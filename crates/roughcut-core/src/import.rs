@@ -1,5 +1,4 @@
-//! Turning a file on disk into a bin clip, and deriving the project profile
-//! from the first import.
+//! Turning a file on disk into a bin clip.
 
 use crate::model::{ClipId, Project, SourceClip};
 use crate::probe::MediaInfo;
@@ -16,19 +15,15 @@ pub enum ImportOutcome {
 
 /// Add a probed file to the bin.
 ///
-/// The first import fixes the project profile; every later import is accepted
-/// as-is and flagged when its rate differs, because MLT will resample it and
-/// frame-exactness for that clip is no longer guaranteed.
+/// Importing may move the working profile — see [`crate::profile`] — but only
+/// while nothing has been marked or assembled. Once it holds still, a clip at
+/// a different rate is accepted as-is and flagged, because MLT will resample
+/// it and frame-exactness for that clip is no longer guaranteed.
 pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportOutcome {
     let path = absolutise(path);
 
     if let Some(existing) = project.clips.iter().find(|c| c.path == path) {
         return ImportOutcome::Duplicate(existing.id);
-    }
-
-    if !project.profile_locked {
-        project.profile = info.to_profile();
-        project.profile_locked = true;
     }
 
     let profile_fps = project.fps();
@@ -48,8 +43,15 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         path,
         proxy_path: None,
         duration_frames: duration_frames.max(1),
+        native_frames: info.native_frames.max(1),
         native_fps_num: native_fps.num,
         native_fps_den: native_fps.den,
+        width: info.width,
+        height: info.height,
+        sample_aspect_num: info.sample_aspect_num,
+        sample_aspect_den: info.sample_aspect_den,
+        progressive: info.progressive,
+        colorspace: info.colorspace,
         has_audio: info.has_audio,
         video_index: info.video_index,
         audio_index: info.audio_index,
@@ -57,6 +59,8 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         mark_out: None,
         rate_mismatch,
     });
+
+    crate::profile::refresh_working(project);
     ImportOutcome::Added(id)
 }
 
@@ -79,6 +83,7 @@ mod tests {
         MediaInfo {
             width: w,
             height: h,
+            rotation: 0,
             fps,
             native_frames: frames,
             sample_aspect_num: 1,
@@ -92,34 +97,14 @@ mod tests {
     }
 
     #[test]
-    fn the_first_import_fixes_the_profile() {
-        let mut p = Project::new();
-        assert!(!p.profile_locked);
-        add_clip(
-            &mut p,
-            Path::new("/m/a.mp4"),
-            &info(3840, 2160, Rational::new(24000, 1001), 500),
-        );
-        assert!(p.profile_locked);
-        assert_eq!(p.profile.width, 3840);
-        assert_eq!(p.profile.frame_rate_num, 24000);
-        assert_eq!(p.profile.frame_rate_den, 1001);
-    }
-
-    #[test]
-    fn later_imports_never_change_the_profile() {
-        let mut p = Project::new();
-        add_clip(&mut p, Path::new("/m/a.mp4"), &info(1920, 1080, Rational::new(25, 1), 250));
-        add_clip(&mut p, Path::new("/m/b.mp4"), &info(3840, 2160, Rational::new(50, 1), 500));
-        assert_eq!(p.profile.width, 1920);
-        assert_eq!(p.profile.frame_rate_num, 25);
-    }
-
-    #[test]
     fn a_rate_mismatch_is_flagged_and_the_duration_converted() {
         let mut p = Project::new();
         add_clip(&mut p, Path::new("/m/a.mp4"), &info(1920, 1080, Rational::new(25, 1), 250));
+        // Marking pins the working rate at 25, so the 50 fps import that
+        // follows is the odd one out rather than moving the whole project.
+        p.clips[0].mark_in = Some(0);
         add_clip(&mut p, Path::new("/m/b.mp4"), &info(1920, 1080, Rational::new(50, 1), 500));
+        assert_eq!(p.fps(), Rational::new(25, 1));
         assert!(!p.clips[0].rate_mismatch);
         assert!(p.clips[1].rate_mismatch);
         // 500 frames of 50fps is 10 s, which is 250 frames of profile time.

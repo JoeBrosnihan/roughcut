@@ -18,6 +18,7 @@ use roughcut_core::mlt::{self, ExportOptions};
 use roughcut_core::model::{ClipId, Project};
 use roughcut_core::probe::MediaInfo;
 use roughcut_core::project_io;
+use roughcut_core::rotate::Turn;
 use roughcut_core::time::Rational;
 use roughcut_core::timeline;
 use roughcut_core::tools::{expand_drop, Tools};
@@ -105,9 +106,21 @@ pub struct RoughcutApp {
     pub fullscreen: bool,
     fullscreen_pending: bool,
 
+    /// Files submitted for probing, in the order they were chosen, and the
+    /// results that have come back. Probes finish out of order on the worker
+    /// pool, so results are held here and applied strictly in order — the bin
+    /// then matches the order you picked, and, far more importantly, the
+    /// project profile is taken from the clip you actually chose first rather
+    /// than from whichever one probed fastest.
+    import_order: Vec<PathBuf>,
+    probe_results: HashMap<PathBuf, Result<MediaInfo, String>>,
+
     pub thumbnails: HashMap<ClipId, egui::TextureHandle>,
     thumb_requested: HashSet<ClipId>,
     pub proxy_state: HashMap<ClipId, ProxyState>,
+    /// Clips whose file is being rewritten on disk right now. Rotating twice
+    /// at once would have two ffmpeg processes racing for the same path.
+    pub rotating: HashSet<ClipId>,
 
     /// Text for the alert bar, with when it was set. Info messages expire;
     /// warnings and errors stay until the condition behind them clears.
@@ -174,9 +187,12 @@ impl RoughcutApp {
             force_media_jump: false,
             fullscreen: false,
             fullscreen_pending: false,
+            import_order: Vec::new(),
+            probe_results: HashMap::new(),
             thumbnails: HashMap::new(),
             thumb_requested: HashSet::new(),
             proxy_state: HashMap::new(),
+            rotating: HashSet::new(),
             status: None,
             show_help: false,
             show_missing_tool: false,
@@ -581,6 +597,7 @@ impl RoughcutApp {
             Action::MoveEarlier => self.move_selected(-1),
             Action::MoveLater => self.move_selected(1),
 
+            Action::NewProject => self.new_project(),
             Action::OpenProject => self.open_project_dialog(),
             Action::SaveProject => self.save_project(false),
             Action::SaveProjectAs => self.save_project(true),
@@ -976,17 +993,107 @@ impl RoughcutApp {
     }
 
     pub fn select_bin_clip(&mut self, id: ClipId) {
+        // Touching the bin always focuses the source, *including* when the
+        // clip was already the selected one. Anything else and a key that acts
+        // on "whichever region has focus" — Delete most visibly — keeps acting
+        // on the timeline, and clicking the clip again does not fix it because
+        // there is nothing to change.
+        self.focus = Focus::Source;
+
         if self.selected_clip == Some(id) {
             return;
         }
         self.monitor.pause();
         self.selected_clip = Some(id);
-        self.focus = Focus::Source;
         self.source_frame = self
             .project
             .clip(id)
             .and_then(|c| c.mark_in)
             .unwrap_or(0);
+    }
+
+    /// Turn a clip's file a quarter turn on disk.
+    ///
+    /// This edits the user's original file, which nothing else in Roughcut
+    /// does — but it is the only fix that survives leaving the program, and
+    /// footage that arrives on its side is otherwise useless everywhere, not
+    /// just here. It is safe to do mid-edit because rewriting the orientation
+    /// is a stream copy: the frame count and rate cannot move, so marks and
+    /// cuts made before the rotation still name the same frames after it.
+    pub fn rotate_clip(&mut self, id: ClipId, turn: Turn) {
+        if !self.tools.has_ffmpeg() || self.tools.ffprobe.is_none() {
+            self.set_status(
+                "rotating needs ffmpeg and ffprobe, which were not found",
+                StatusKind::Warn,
+            );
+            return;
+        }
+        if !self.rotating.insert(id) {
+            return; // already turning
+        }
+        let Some(clip) = self.project.clip(id) else {
+            self.rotating.remove(&id);
+            return;
+        };
+        let path = clip.path.clone();
+        if !path.exists() {
+            self.rotating.remove(&id);
+            self.set_status(
+                format!("{} is missing — relink it first", clip.file_name()),
+                StatusKind::Warn,
+            );
+            return;
+        }
+        self.set_status(format!("rotating {}…", clip.file_name()), StatusKind::Info);
+        self.workers.submit(Job::Rotate {
+            clip_id: id,
+            path,
+            turn,
+        });
+    }
+
+    /// Adopt the new orientation of a file Roughcut just rewrote.
+    ///
+    /// Everything derived from the old orientation is thrown away: the
+    /// filmstrip, and the proxy, which was encoded the wrong way round and
+    /// would otherwise keep showing the clip on its side during playback.
+    fn on_rotated(&mut self, id: ClipId, info: MediaInfo) {
+        self.rotating.remove(&id);
+
+        let name = self.project.clip(id).map(|c| c.file_name()).unwrap_or_default();
+        self.edit(|p| {
+            let Some(clip) = p.clip_mut(id) else {
+                return false;
+            };
+            clip.width = info.width;
+            clip.height = info.height;
+            clip.sample_aspect_num = info.sample_aspect_num;
+            clip.sample_aspect_den = info.sample_aspect_den;
+            true
+        });
+        // A different frame shape can change what the project should be; the
+        // usual rule decides whether it is still free to move.
+        roughcut_core::profile::refresh_working(&mut self.project);
+
+        // Drop the stale proxy and filmstrip, then rebuild both.
+        let stale_proxy = self.project.clip(id).and_then(|c| c.proxy_path.clone());
+        if let Some(p) = stale_proxy {
+            let _ = std::fs::remove_file(&p);
+            if let Some(c) = self.project.clip_mut(id) {
+                c.proxy_path = None;
+            }
+        }
+        self.thumbnails.remove(&id);
+        self.thumb_requested.remove(&id);
+        self.proxy_state.remove(&id);
+        self.request_thumbnail(id);
+        let (w, h) = (info.width, info.height);
+        self.request_proxy(id, info);
+
+        // Whatever is on screen is now the wrong way round.
+        self.monitor.reload();
+
+        self.set_status(format!("{name} is now {w}x{h}"), StatusKind::Info);
     }
 
     // --- file operations ----------------------------------------------------
@@ -1018,6 +1125,7 @@ impl RoughcutApp {
         let mut n = 0;
         for path in paths {
             for file in expand_drop(&path) {
+                self.import_order.push(file.clone());
                 self.workers.submit(Job::Probe { path: file });
                 n += 1;
             }
@@ -1041,6 +1149,51 @@ impl RoughcutApp {
         }
         if !media.is_empty() {
             self.import_paths(media);
+        }
+    }
+
+    /// Start again with an empty project.
+    ///
+    /// This is also the only way to change the project's format: the profile
+    /// is fixed by the first clip imported and never moves, because every
+    /// position in the application is a frame number in profile time and
+    /// changing the rate underneath them would silently invalidate the lot.
+    fn new_project(&mut self) {
+        // Make sure whatever is on screen is recoverable before it goes. The
+        // snapshot is not deleted, so File > Recover last session can reach it
+        // until the new project's first edit overwrites it.
+        let had_unsaved = self.dirty;
+        if had_unsaved {
+            self.autosave_pending = true;
+            self.flush_autosave();
+        }
+
+        self.workers.clear_queue();
+        self.import_order.clear();
+        self.probe_results.clear();
+        self.thumbnails.clear();
+        self.thumb_requested.clear();
+        self.proxy_state.clear();
+        self.missing_media.clear();
+        self.monitor.clear();
+
+        self.project = Project::new();
+        self.history.clear();
+        self.project_path = None;
+        self.dirty = false;
+        self.selected_clip = None;
+        self.selected_item = None;
+        self.source_frame = 0;
+        self.playhead = 0;
+        self.focus = Focus::Source;
+        self.zoom_fit = true;
+        self.monitor.set_fps(self.project.fps());
+
+        if had_unsaved {
+            self.set_status(
+                "new project — the previous unsaved work is under File ▸ Recover                  last session until you change something here",
+                StatusKind::Warn,
+            );
         }
     }
 
@@ -1223,16 +1376,11 @@ impl RoughcutApp {
         let results: Vec<JobResult> = self.workers.poll().collect();
         for result in results {
             match result {
-                JobResult::Probed { path, result } => match result {
-                    Ok(info) => self.on_probed(path, info),
-                    Err(e) => self.set_status(
-                        format!(
-                            "{}: {e:#}",
-                            path.file_name().unwrap_or_default().to_string_lossy()
-                        ),
-                        StatusKind::Error,
-                    ),
-                },
+                JobResult::Probed { path, result } => {
+                    self.probe_results
+                        .insert(path, result.map_err(|e| format!("{e:#}")));
+                    self.drain_probes();
+                }
                 JobResult::Filmstrip { clip_id, result } => match result {
                     Ok(strip) => {
                         let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -1270,12 +1418,41 @@ impl RoughcutApp {
                         self.set_status(format!("proxy: {e:#}"), StatusKind::Warn);
                     }
                 },
+                JobResult::Rotated { clip_id, result } => match result {
+                    Ok(info) => self.on_rotated(clip_id, info),
+                    Err(e) => {
+                        self.rotating.remove(&clip_id);
+                        self.set_status(format!("{e:#}"), StatusKind::Error);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Apply finished probes in the order the files were chosen, stopping at
+    /// the first one that has not come back yet.
+    fn drain_probes(&mut self) {
+        while let Some(next) = self.import_order.first().cloned() {
+            let Some(result) = self.probe_results.remove(&next) else {
+                return; // still probing; everything after it waits
+            };
+            self.import_order.remove(0);
+            match result {
+                Ok(info) => self.on_probed(next, info),
+                Err(e) => self.set_status(
+                    format!(
+                        "{}: {e}",
+                        next.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    StatusKind::Error,
+                ),
             }
         }
     }
 
     fn on_probed(&mut self, path: PathBuf, info: MediaInfo) {
         let was_empty = self.project.clips.is_empty();
+        let before = self.project.profile.clone();
         let mut new_id = None;
         self.edit(|p| match add_clip(p, &path, &info) {
             ImportOutcome::Added(id) => {
@@ -1293,10 +1470,15 @@ impl RoughcutApp {
         };
 
         if was_empty {
-            self.monitor.set_fps(self.project.fps());
             self.selected_clip = Some(id);
+        }
+        // Importing can still move the project's format — it tracks the whole
+        // bin until the first mark or cut pins it — so say so whenever it does,
+        // not only on the first file.
+        if self.project.profile != before {
+            self.monitor.set_fps(self.project.fps());
             self.set_status(
-                format!("project profile set to {}", self.project.profile.description()),
+                format!("project is {}", self.project.profile.description()),
                 StatusKind::Info,
             );
         }
@@ -1317,23 +1499,31 @@ impl RoughcutApp {
         }
 
         self.request_thumbnail(id);
+        self.request_proxy(id, info);
+    }
 
-        if self.settings.proxies_enabled {
-            if let Some(dir) = self.settings.resolve_proxy_dir(self.project_path.as_deref()) {
-                self.proxy_state.insert(id, ProxyState::Queued);
-                self.workers.submit(Job::Proxy {
-                    clip_id: id,
-                    source: path,
-                    info: Box::new(info),
-                    proxy_dir: dir,
-                });
-            } else {
-                self.set_status(
-                    "save the project before generating proxies, so they have somewhere to live",
-                    StatusKind::Warn,
-                );
-            }
+    fn request_proxy(&mut self, id: ClipId, info: MediaInfo) {
+        if !self.settings.proxies_enabled {
+            return;
         }
+        let Some(clip) = self.project.clip(id) else {
+            return;
+        };
+        let source = clip.path.clone();
+        let Some(dir) = self.settings.resolve_proxy_dir(self.project_path.as_deref()) else {
+            self.set_status(
+                "save the project before generating proxies, so they have somewhere to live",
+                StatusKind::Warn,
+            );
+            return;
+        };
+        self.proxy_state.insert(id, ProxyState::Queued);
+        self.workers.submit(Job::Proxy {
+            clip_id: id,
+            source,
+            info: Box::new(info),
+            proxy_dir: dir,
+        });
     }
 
     fn request_thumbnail(&mut self, id: ClipId) {

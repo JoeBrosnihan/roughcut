@@ -32,7 +32,11 @@ impl std::fmt::Display for ClipId {
     }
 }
 
-/// Fixed at project creation from the first clip imported. Never changed.
+/// The resolution, rate and colour the project currently works in.
+///
+/// Not fixed at creation: see `crate::profile`. While the timeline is empty
+/// and nothing is marked this tracks the bin; after that it holds still, and
+/// the export derives its own from the clips actually used.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     pub frame_rate_num: i64,
@@ -99,9 +103,31 @@ pub struct SourceClip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_path: Option<PathBuf>,
     /// Length in profile time, inclusive count (a 100-frame clip stores 100).
+    /// Derived from `native_frames`; recomputed whenever the working profile
+    /// moves, so it never accumulates rounding.
     pub duration_frames: i64,
+    /// Length in the file's OWN time, as ffprobe reported it. The durable
+    /// fact; `duration_frames` is a view of it. Zero in projects written
+    /// before this field existed — see `project_io::load`.
+    #[serde(default)]
+    pub native_frames: i64,
     pub native_fps_num: i64,
     pub native_fps_den: i64,
+    /// The clip's own format, kept so a project format can be suggested from
+    /// everything in the bin rather than anchored to whichever file happened
+    /// to be imported first. Defaulted when loading older projects.
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default = "default_height")]
+    pub height: u32,
+    #[serde(default = "one")]
+    pub sample_aspect_num: u32,
+    #[serde(default = "one")]
+    pub sample_aspect_den: u32,
+    #[serde(default = "yes")]
+    pub progressive: bool,
+    #[serde(default = "bt709")]
+    pub colorspace: u32,
     pub has_audio: bool,
     /// Stream indices as ffprobe reported them, forwarded to MLT so it does
     /// not have to re-detect (`avformat-novalidate` relies on these).
@@ -120,6 +146,21 @@ pub struct SourceClip {
 
 fn minus_one() -> i32 {
     -1
+}
+fn default_width() -> u32 {
+    1920
+}
+fn default_height() -> u32 {
+    1080
+}
+fn one() -> u32 {
+    1
+}
+fn yes() -> bool {
+    true
+}
+fn bt709() -> u32 {
+    709
 }
 
 impl SourceClip {
@@ -192,9 +233,6 @@ pub struct Project {
     pub clips: Vec<SourceClip>,
     /// The single video track, in order.
     pub timeline: Vec<TimelineItem>,
-    /// False until the first import fixes the profile.
-    #[serde(default)]
-    pub profile_locked: bool,
 }
 
 impl Default for Project {
@@ -204,7 +242,6 @@ impl Default for Project {
             profile: Profile::default(),
             clips: Vec::new(),
             timeline: Vec::new(),
-            profile_locked: false,
         }
     }
 }

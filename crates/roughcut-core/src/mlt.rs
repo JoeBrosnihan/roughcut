@@ -59,7 +59,22 @@ impl Default for ExportOptions {
 }
 
 /// Serialise `project` to MLT XML.
+/// Serialise the project as MLT XML.
+///
+/// The export profile is not the working one: it is derived here from the
+/// clips actually cut into the timeline (see [`crate::profile::for_export`]),
+/// and the project is expressed in it first. When the working rate already
+/// matches — the ordinary case — that conversion is the identity.
 pub fn to_xml(project: &Project, opts: &ExportOptions) -> Result<String> {
+    let target = crate::profile::for_export(project);
+    let retimed;
+    let project = if target == project.profile {
+        project
+    } else {
+        retimed = crate::profile::retime(project, &target);
+        &retimed
+    };
+
     let fps = project.fps();
     let fmt = |frame: i64| -> String {
         match opts.time_format {
@@ -336,8 +351,15 @@ mod tests {
                     }),
                     proxy_path: Some(PathBuf::from("/proxies/a.mp4")),
                     duration_frames: 300,
+                    native_frames: 300,
                     native_fps_num: 30000,
                     native_fps_den: 1001,
+                    width: 1920,
+                    height: 1080,
+                    sample_aspect_num: 1,
+                    sample_aspect_den: 1,
+                    progressive: true,
+                    colorspace: 709,
                     has_audio: true,
                     video_index: 0,
                     audio_index: 1,
@@ -354,8 +376,15 @@ mod tests {
                     }),
                     proxy_path: None,
                     duration_frames: 350,
+                    native_frames: 350,
                     native_fps_num: 30000,
                     native_fps_den: 1001,
+                    width: 1920,
+                    height: 1080,
+                    sample_aspect_num: 1,
+                    sample_aspect_den: 1,
+                    progressive: true,
+                    colorspace: 709,
                     has_audio: false,
                     video_index: 0,
                     audio_index: -1,
@@ -382,7 +411,6 @@ mod tests {
                     out_frame: 9,
                 },
             ],
-            profile_locked: true,
         }
     }
 

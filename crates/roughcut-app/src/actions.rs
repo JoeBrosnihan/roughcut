@@ -37,6 +37,7 @@ pub enum Action {
     MoveLater,
 
     // File
+    NewProject,
     OpenProject,
     SaveProject,
     SaveProjectAs,
@@ -119,6 +120,7 @@ pub const KEY_MAP: &[Section] = &[
     Section {
         title: "File",
         bindings: &[
+            Binding { keys: "Ctrl+N", description: "New project — the first clip imported sets the format", scope: Scope::Global },
             Binding { keys: "Ctrl+O", description: "Open project", scope: Scope::Global },
             Binding { keys: "Ctrl+S", description: "Save project", scope: Scope::Global },
             Binding { keys: "Ctrl+Shift+S", description: "Save project as", scope: Scope::Global },

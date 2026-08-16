@@ -127,6 +127,7 @@ mod tests {
         MediaInfo {
             width: 1920,
             height: 1080,
+            rotation: 0,
             fps,
             native_frames: frames,
             sample_aspect_num: 1,

@@ -51,6 +51,7 @@ act on whichever region currently has focus; press `Tab` to switch.
 
 | Key | Action | Scope |
 | --- | --- | --- |
+| `Ctrl+N` | New project — the first clip imported sets the format | Any |
 | `Ctrl+O` | Open project | Any |
 | `Ctrl+S` | Save project | Any |
 | `Ctrl+Shift+S` | Save project as | Any |

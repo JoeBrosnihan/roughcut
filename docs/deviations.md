@@ -46,3 +46,14 @@ specifically so it does not break §3's idle budget. See
 exist so a stable installed copy and an actively changing source tree can
 coexist without sharing settings or an autosave slot. See
 [building.md](building.md).
+
+**9. The profile is not fixed by the first clip imported** (§9). It tracks the
+whole bin until the first mark or cut pins it, and the *export* profile is
+derived separately from the clips actually used. Requested by the user, whose
+footage routinely arrives from several phones at once, where the first file the
+dialog lists is a meaningless anchor. See [timing.md](timing.md).
+
+**10. Rotating a clip edits the user's original file.** Nothing else in
+Roughcut does. It is a display-matrix rewrite done as a stream copy — no
+re-encode, no generation loss, no change to frame count or rate — and it is the
+only fix that survives leaving the program. Requested by the user.

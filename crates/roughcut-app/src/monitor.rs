@@ -283,6 +283,17 @@ impl Monitor {
         self.show_impl(path, frame, true);
     }
 
+    /// Forget which file is loaded, so the next `show` opens it afresh.
+    ///
+    /// Needed when the bytes behind a path have changed underneath mpv — the
+    /// only case being a clip Roughcut has just rotated on disk.
+    pub fn reload(&mut self) {
+        self.loaded = None;
+        self.eof = false;
+        self.requested_frame = None;
+        self.corrected_for = None;
+    }
+
     fn show_impl(&mut self, path: &Path, frame: i64, force: bool) {
         let Some(player) = &self.player else {
             return;

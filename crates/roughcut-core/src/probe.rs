@@ -11,8 +11,15 @@ use std::path::Path;
 /// is deliberately dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaInfo {
+    /// DISPLAY width, i.e. after the file's rotation is applied. Phone footage
+    /// is routinely stored landscape with a quarter-turn in the display
+    /// matrix, and every consumer of these numbers — the profile, the proxy
+    /// scaler, mpv — works in display space, so this does too.
     pub width: u32,
     pub height: u32,
+    /// The file's display-matrix rotation, normalised to 0, 90, 180 or 270
+    /// degrees counter-clockwise. Already applied to `width`/`height`.
+    pub rotation: i32,
     /// Exact rational from `r_frame_rate`.
     pub fps: Rational,
     /// Frame count in the file's own time base.
@@ -94,14 +101,22 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
         .iter()
         .find(|s| s.get("codec_type").and_then(Value::as_str) == Some("audio"));
 
-    let width = video
+    let coded_width = video
         .get("width")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("video stream has no width"))? as u32;
-    let height = video
+    let coded_height = video
         .get("height")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("video stream has no height"))? as u32;
+
+    let rotation = parse_rotation(video);
+    let quarter_turned = rotation == 90 || rotation == 270;
+    let (width, height) = if quarter_turned {
+        (coded_height, coded_width)
+    } else {
+        (coded_width, coded_height)
+    };
 
     // `r_frame_rate` is the real (constant) rate; `avg_frame_rate` is an
     // average that lies on files with a trailing partial frame.
@@ -127,6 +142,9 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
         .and_then(parse_aspect)
         // ffprobe omits SAR entirely when it is 1:1.
         .unwrap_or((1, 1));
+    // SAR describes coded pixels; a quarter turn inverts it along with
+    // everything else.
+    let (sar_n, sar_d) = if quarter_turned { (sar_d, sar_n) } else { (sar_n, sar_d) };
 
     // `field_order` is absent on most progressive files, so anything that is
     // not explicitly one of the interlaced orders counts as progressive.
@@ -158,6 +176,7 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
     Ok(MediaInfo {
         width,
         height,
+        rotation,
         fps,
         native_frames,
         sample_aspect_num: sar_n,
@@ -207,6 +226,36 @@ fn frame_count(video: &Value, json: &Value, fps: Rational) -> Result<i64> {
         }
     }
     bail!("cannot determine a frame count for this file")
+}
+
+/// The display-matrix rotation, normalised to 0/90/180/270 counter-clockwise.
+///
+/// Written two ways depending on the writer's vintage: as `rotation` in the
+/// Display Matrix side data (what ffmpeg emits now, and what may be negative),
+/// or as a `rotate` tag (what older tools wrote). Anything that is not a
+/// quarter turn is treated as no rotation, since nothing here can honour it.
+fn parse_rotation(video: &Value) -> i32 {
+    let raw = video
+        .get("side_data_list")
+        .and_then(Value::as_array)
+        .and_then(|list| {
+            list.iter()
+                .find_map(|d| d.get("rotation").and_then(|v| v.as_f64()))
+        })
+        .or_else(|| {
+            video
+                .get("tags")
+                .and_then(|t| t.get("rotate"))
+                .and_then(|v| v.as_f64().or_else(|| v.as_str()?.trim().parse().ok()))
+        })
+        .unwrap_or(0.0);
+    let deg = raw.round() as i64;
+    match deg.rem_euclid(360) {
+        90 => 90,
+        180 => 180,
+        270 => 270,
+        _ => 0,
+    }
 }
 
 /// ffprobe writes numbers as JSON strings in some fields and numbers in others.
@@ -348,6 +397,39 @@ mod tests {
         v["streams"][0]["width"] = json!(720);
         v["streams"][0]["height"] = json!(576);
         assert_eq!(parse_probe_json(&v).unwrap().colorspace, 601);
+    }
+
+    #[test]
+    fn a_quarter_turn_is_reported_in_display_orientation() {
+        // What a phone writes: landscape frames plus a display matrix.
+        let mut v = hd_probe();
+        v["streams"][0]["side_data_list"] = json!([{ "rotation": -90 }]);
+        let info = parse_probe_json(&v).unwrap();
+        assert_eq!(info.rotation, 270);
+        assert_eq!((info.width, info.height), (1080, 1920));
+    }
+
+    #[test]
+    fn a_half_turn_leaves_the_frame_shape_alone() {
+        let mut v = hd_probe();
+        v["streams"][0]["side_data_list"] = json!([{ "rotation": 180 }]);
+        let info = parse_probe_json(&v).unwrap();
+        assert_eq!(info.rotation, 180);
+        assert_eq!((info.width, info.height), (1920, 1080));
+    }
+
+    #[test]
+    fn the_legacy_rotate_tag_is_understood_too() {
+        let mut v = hd_probe();
+        v["streams"][0]["tags"] = json!({ "rotate": "90" });
+        let info = parse_probe_json(&v).unwrap();
+        assert_eq!(info.rotation, 90);
+        assert_eq!((info.width, info.height), (1080, 1920));
+    }
+
+    #[test]
+    fn an_unrotated_file_reports_no_rotation() {
+        assert_eq!(parse_probe_json(&hd_probe()).unwrap().rotation, 0);
     }
 
     #[test]

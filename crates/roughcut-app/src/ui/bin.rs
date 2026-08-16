@@ -10,6 +10,7 @@ use crate::ui::truncate_middle;
 use crate::workers;
 use egui::{CornerRadius, Rect, Sense, StrokeKind};
 use roughcut_core::model::ClipId;
+use roughcut_core::rotate::Turn;
 use roughcut_core::time::format_timecode;
 
 pub const BIN_WIDTH: f32 = 250.0;
@@ -97,6 +98,9 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
             ui.add_space(4.0);
             ui.menu_button("File", |ui| {
                 ui.set_min_width(190.0);
+                if menu_item(ui, "New project", "Ctrl+N") {
+                    action = Some(Action::NewProject);
+                }
                 if menu_item(ui, "Import media…", "Ctrl+I") {
                     action = Some(Action::Import);
                 }
@@ -375,12 +379,35 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
 
     let mut remove = false;
     let mut relink = false;
+    let mut turn = None;
+    let rotating = app.rotating.contains(&id);
     response.context_menu(|ui| {
         ui.set_min_width(170.0);
         if missing && ui.button("Relink…").clicked() {
             relink = true;
             ui.close_kind(egui::UiKind::Menu);
         }
+        // Rotation rewrites the file on disk, so it stays available whatever
+        // the timeline is doing — a clip that arrived on its side is wrong
+        // everywhere, and the fix cannot wait until it is unused.
+        ui.add_enabled_ui(!missing && !rotating, |ui| {
+            if ui.button("Rotate right").clicked() {
+                turn = Some(Turn::Clockwise);
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if ui.button("Rotate left").clicked() {
+                turn = Some(Turn::CounterClockwise);
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        });
+        if rotating {
+            ui.label(
+                egui::RichText::new("rotating…")
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+        }
+        ui.separator();
         ui.add_enabled_ui(uses == 0, |ui| {
             if ui.button("Remove from bin").clicked() {
                 remove = true;
@@ -400,6 +427,9 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     });
     if relink {
         app.relink_dialog(id);
+    }
+    if let Some(turn) = turn {
+        app.rotate_clip(id, turn);
     }
     if remove {
         app.select_bin_clip(id);

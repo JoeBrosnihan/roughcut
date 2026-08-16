@@ -6,9 +6,9 @@ Point Roughcut at a folder of video, skim it, mark the good bits, and build an
 ordered sequence. Export a `.mlt` project that Shotcut opens with every cut
 exactly where you put it.
 
-It is deliberately small: no effects, transitions, audio mixing, titles, or a
-second video track, and it cannot render video. Those are Shotcut's job. This is
-the part before them — mostly watching and choosing.
+It is deliberately small: no effects, transitions, audio mixing, titles, second
+video track, or rendering. Those are Shotcut's job — this is the part before
+them, which is mostly watching and choosing.
 
 ## What you need
 
@@ -31,12 +31,12 @@ Then repeat. `Space` plays, `←` `→` step a frame, `Tab` moves between the so
 and the timeline. `S` splits and `X` deletes and closes the gap — Shotcut's keys.
 Hover a thumbnail to skim that clip; click to open it at that moment. Drag clips
 onto the timeline, or along it to reorder; drag the ruler above them to scrub.
+Right-click a clip to rotate one that came off a phone sideways.
 **Press `?` for the full keyboard map**, or read [KEYS.md](KEYS.md).
 
-`Ctrl+E` exports a `.mlt`. Open it in Shotcut and finish there. The trip is
-one-way — Roughcut writes `.mlt` and never reads it — so treat it as a handoff,
-not a round trip. Your work is saved continuously and offered back after a
-crash.
+`Ctrl+E` exports a `.mlt`, sized and timed from the clips you used. Open it in
+Shotcut and finish there; the trip is one-way, so treat it as a handoff. Your
+work saves itself continuously, and is offered back after a crash.
 
 ## Building it, or changing it
 

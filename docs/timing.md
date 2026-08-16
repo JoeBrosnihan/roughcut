@@ -10,12 +10,46 @@ rounded to `29.97` anywhere, including in the exported XML. Timecode exists
 only as a display format, produced at the last moment and parsed immediately on
 entry.
 
-The profile — rate, size, sample aspect, colourspace — is fixed by the first
-clip imported and never changes afterwards. A later import at a different rate
-is accepted, flagged with a persistent `FPS` badge in the bin and on its
-timeline blocks, and its duration converted into profile time. MLT will
-resample it and frame-exactness for that clip is not guaranteed, which is what
-the badge is telling you.
+## Which rate and size the project uses
+
+Two profiles, deliberately.
+
+The **working profile** is the coordinate system frame numbers are quoted in
+while you edit. It is derived from the whole bin — most common rate, ties to
+the higher one; largest frame size, so nothing is upscaled — and it is
+re-derived on every import for as long as it is still free to move. It stops
+moving the moment you mark or cut anything, because from then on a frame number
+records a decision you made while watching, and silently rescaling it would
+move the cut. The first clip imported gets no special status: it is whichever
+file the dialog happened to list first, and footage routinely arrives from
+several phones at once.
+
+The **export profile** is derived at export time from the clips actually cut
+into the timeline. Footage left unused in the bin has no say in the shape of
+the finished video. When it differs from the working profile the project is
+re-expressed in it first — durations recomputed from each file's own native
+frame count, and each `in`/`out` rescaled, treating `out + 1` as the boundary
+that scales. In the ordinary case, where everything is at one rate, that
+conversion is the identity and the export path is byte-for-byte what it was.
+
+Size, sample aspect and colourspace can be deferred to export for free: none of
+them can move a frame number. Only the rate can, which is why only the rate
+needs the rescale.
+
+A clip whose own rate differs from the working profile is accepted, flagged
+with a persistent `FPS` badge in the bin and on its timeline blocks, and its
+duration converted into working time. MLT will resample it and frame-exactness
+for that clip is not guaranteed, which is what the badge is telling you.
+
+## Clips that arrive on their side
+
+Rotation is read from the display matrix at probe time and applied to the
+reported frame size, so everything downstream — the profile, proxies,
+thumbnails, mpv — works in display orientation. Right-clicking a clip and
+rotating it rewrites that matrix in the file itself with a stream copy, so the
+frame count and rate cannot move and marks made before the rotation still name
+the same frames after it. Re-encoding was rejected: minutes per clip,
+generation loss, and encoders are free to alter frame counts.
 
 `crates/roughcut-core/src/time.rs` is the only module allowed to convert
 between frames and anything else.

@@ -11,6 +11,7 @@ use crossbeam_channel::{Receiver, Sender};
 use roughcut_core::model::ClipId;
 use roughcut_core::probe::{probe, MediaInfo};
 use roughcut_core::proxy;
+use roughcut_core::rotate::{self, Turn};
 use roughcut_core::time::{frame_to_seconds, Rational};
 use roughcut_core::tools::{quiet_command, Tools};
 use std::collections::VecDeque;
@@ -45,6 +46,13 @@ pub enum Job {
         source: PathBuf,
         info: Box<MediaInfo>,
         proxy_dir: PathBuf,
+    },
+    /// Rewrite a source file's orientation in place. A stream copy, but on a
+    /// large file still slow enough that the UI must not wait on it.
+    Rotate {
+        clip_id: ClipId,
+        path: PathBuf,
+        turn: Turn,
     },
 }
 
@@ -83,6 +91,10 @@ pub enum JobResult {
     ProxyDone {
         clip_id: ClipId,
         result: Result<PathBuf>,
+    },
+    Rotated {
+        clip_id: ClipId,
+        result: Result<MediaInfo>,
     },
 }
 
@@ -265,8 +277,15 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                         path: source,
                         proxy_path: None,
                         duration_frames: info.native_frames,
+                        native_frames: info.native_frames,
                         native_fps_num: info.fps.num,
                         native_fps_den: info.fps.den,
+                        width: info.width,
+                        height: info.height,
+                        sample_aspect_num: info.sample_aspect_num,
+                        sample_aspect_den: info.sample_aspect_den,
+                        progressive: info.progressive,
+                        colorspace: info.colorspace,
                         has_audio: info.has_audio,
                         video_index: info.video_index,
                         audio_index: info.audio_index,
@@ -281,6 +300,19 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                 )),
             };
             JobResult::ProxyDone { clip_id, result }
+        }
+        Job::Rotate {
+            clip_id,
+            path,
+            turn,
+        } => {
+            let result = match (&shared.tools.ffmpeg, &shared.tools.ffprobe) {
+                (Some(ffmpeg), Some(ffprobe)) => {
+                    rotate::rotate_in_place(ffmpeg, ffprobe, &path, turn)
+                }
+                _ => Err(anyhow::anyhow!("rotating needs both ffmpeg and ffprobe")),
+            };
+            JobResult::Rotated { clip_id, result }
         }
     }
 }

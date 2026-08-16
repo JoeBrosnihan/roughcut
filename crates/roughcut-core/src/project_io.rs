@@ -57,7 +57,7 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
 pub fn load(path: &Path) -> Result<Project> {
     let text =
         fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-    let project: Project = serde_json::from_str(&text)
+    let mut project: Project = serde_json::from_str(&text)
         .with_context(|| format!("{} is not a valid Roughcut project", path.display()))?;
     if project.version > SCHEMA_VERSION {
         bail!(
@@ -66,6 +66,16 @@ pub fn load(path: &Path) -> Result<Project> {
             project.version,
             SCHEMA_VERSION
         );
+    }
+    // Projects written before clips remembered their own native length: recover
+    // it from the profile-time duration, which is the same number whenever the
+    // rates match and an exact conversion of it when they do not.
+    for clip in &mut project.clips {
+        if clip.native_frames <= 0 {
+            clip.native_frames =
+                crate::time::convert_frames(clip.duration_frames, project.profile.fps(), clip.native_fps())
+                    .max(1);
+        }
     }
     Ok(project)
 }
@@ -218,8 +228,15 @@ mod tests {
             path: PathBuf::from("/media/one.mp4"),
             proxy_path: None,
             duration_frames: 300,
+            native_frames: 300,
             native_fps_num: 30000,
             native_fps_den: 1001,
+            width: 1920,
+            height: 1080,
+            sample_aspect_num: 1,
+            sample_aspect_den: 1,
+            progressive: true,
+            colorspace: 709,
             has_audio: true,
             video_index: 0,
             audio_index: 1,

@@ -43,6 +43,7 @@ fn map_key(key: Key, m: Modifiers) -> Option<Action> {
     // Ctrl-modified bindings first: Ctrl+I must not also mean "mark in".
     if ctrl {
         return match key {
+            Key::N => Some(Action::NewProject),
             Key::O => Some(Action::OpenProject),
             Key::S if shift => Some(Action::SaveProjectAs),
             Key::S => Some(Action::SaveProject),
@@ -206,6 +207,7 @@ mod tests {
 
     #[test]
     fn file_bindings() {
+        assert_eq!(map_key(Key::N, ctrl()), Some(Action::NewProject));
         assert_eq!(map_key(Key::O, ctrl()), Some(Action::OpenProject));
         assert_eq!(map_key(Key::S, ctrl()), Some(Action::SaveProject));
         assert_eq!(map_key(Key::S, ctrl_shift()), Some(Action::SaveProjectAs));
@@ -260,6 +262,7 @@ mod tests {
             Action::TrimTail,
             Action::MoveEarlier,
             Action::MoveLater,
+            Action::NewProject,
             Action::OpenProject,
             Action::SaveProject,
             Action::SaveProjectAs,
@@ -278,7 +281,7 @@ mod tests {
             Key::Space, Key::L, Key::J, Key::K, Key::ArrowLeft, Key::ArrowRight,
             Key::ArrowUp, Key::ArrowDown, Key::Home, Key::End, Key::I, Key::O,
             Key::X, Key::A, Key::Enter, Key::V, Key::Delete, Key::Backspace,
-            Key::OpenBracket, Key::CloseBracket, Key::S, Key::E, Key::Z,
+            Key::OpenBracket, Key::CloseBracket, Key::S, Key::E, Key::Z, Key::N,
             Key::Tab, Key::Minus, Key::Equals, Key::Num0, Key::Questionmark, Key::F11,
         ];
         let mut produced = Vec::new();

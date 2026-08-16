@@ -20,6 +20,7 @@ use roughcut_core::import::add_clip;
 use roughcut_core::mlt::{self, ExportOptions};
 use roughcut_core::model::Project;
 use roughcut_core::probe::probe;
+use roughcut_core::time::Rational;
 use roughcut_core::timeline;
 use roughcut_core::tools::{find_tool, quiet_command, Tools};
 use std::path::{Path, PathBuf};
@@ -403,5 +404,107 @@ fn consecutive_ranges_join_without_drift() {
     assert!(xml.contains(r#"in="0" out="49""#), "{xml}");
     assert!(xml.contains(r#"in="50" out="99""#), "{xml}");
 
+    cleanup(&dir);
+}
+
+/// A clip at a rate the project is not working in must still export at its own
+/// rate, with every mark rescaled to mean the same moment.
+///
+/// This is the path that opens up once the export profile is derived from the
+/// clips actually used rather than from whatever the project happens to be
+/// working in: the working rate and the export rate genuinely differ, so the
+/// entry positions written to the XML are not the ones held in memory. Getting
+/// the rescale wrong would shift the cut, which melt renders plainly as the
+/// wrong length.
+#[test]
+fn a_clip_exports_at_its_own_rate_when_the_project_works_in_another() {
+    let tools = Tools::discover();
+    let (Some(ffmpeg), Some(ffprobe)) = (tools.ffmpeg.clone(), tools.ffprobe.clone()) else {
+        eprintln!("SKIPPED: ffmpeg and ffprobe are required");
+        return;
+    };
+
+    let dir = workdir("mixed");
+
+    // Two files: 30 fps, and 60 fps holding the same four seconds.
+    let mut make = |name: &str, rate: i64, frames: i64| -> PathBuf {
+        let out = dir.join(name);
+        let status = quiet_command(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size=320x180:rate={rate}:d=4"))
+            .args([
+                "-frames:v",
+                &frames.to_string(),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&out)
+            .status()
+            .expect("cannot run ffmpeg");
+        assert!(status.success());
+        out
+    };
+    let slow = make("slow30.mp4", 30, 120);
+    let fast = make("fast60.mp4", 60, 240);
+
+    let mut project = Project::new();
+    add_clip(&mut project, &slow, &probe(&ffprobe, &slow).unwrap());
+    // Marking pins the working rate at 30 — as it would the moment the editor
+    // made a single decision about the 30 fps clip.
+    project.clips[0].mark_in = Some(0);
+    add_clip(&mut project, &fast, &probe(&ffprobe, &fast).unwrap());
+
+    assert_eq!(project.fps(), Rational::new(30, 1));
+    let fast_id = project.clips[1].id;
+    // 240 frames of 60 fps is four seconds, i.e. 120 frames of working time.
+    assert_eq!(project.clips[1].duration_frames, 120);
+
+    // Cut in one second of the 60 fps clip, expressed in working (30 fps) time.
+    assert!(timeline::append(&mut project, fast_id, 30, 59));
+    assert_eq!(project.timeline[0].len(), 30);
+
+    // The 30 fps clip is in the bin but unused, so it gets no say.
+    let xml = mlt::to_xml(&project, &ExportOptions::default()).unwrap();
+    assert!(
+        xml.contains(r#"frame_rate_num="60""#),
+        "the export should be at the used clip's own rate:\n{xml}"
+    );
+    // One second at 60 fps is frames 60..=119, not 30..=59.
+    assert!(
+        xml.contains(r#"in="60" out="119""#),
+        "marks should be rescaled into the export rate:\n{xml}"
+    );
+
+    let project_file = dir.join("mixed.mlt");
+    mlt::write_to_file(&project, &ExportOptions::default(), &project_file).unwrap();
+
+    let Some(melt) = tools.melt.clone().or_else(|| find_tool("melt")) else {
+        eprintln!("PARTIAL: melt not found, verified the XML only");
+        cleanup(&dir);
+        return;
+    };
+    let rendered = dir.join("rendered.mkv");
+    if !melt_render(&melt, &project_file, &rendered) {
+        eprintln!("PARTIAL: melt could not render the mixed-rate export");
+        cleanup(&dir);
+        return;
+    }
+    let out = probe(&ffprobe, &rendered).expect("cannot probe the render");
+    assert_eq!(
+        out.fps,
+        Rational::new(60, 1),
+        "melt rendered at the wrong rate"
+    );
+    assert_eq!(
+        out.native_frames, 60,
+        "one second at 60 fps should render as 60 frames, not {}",
+        out.native_frames
+    );
     cleanup(&dir);
 }
