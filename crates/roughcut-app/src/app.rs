@@ -90,6 +90,8 @@ pub struct RoughcutApp {
     pub timeline_scroll_to: Option<f32>,
     /// Timeline item being dragged to a new position, if any.
     pub dragging_item: Option<usize>,
+    /// A scrub in progress on the timeline ruler.
+    pub scrubbing: bool,
     /// Set when the playhead crosses a cut, so the next media sync forces mpv
     /// to the new position instead of letting it keep playing where it was.
     force_media_jump: bool,
@@ -167,6 +169,7 @@ impl RoughcutApp {
             timeline_offset: 0.0,
             timeline_scroll_to: None,
             dragging_item: None,
+            scrubbing: false,
             mark_drag: None,
             force_media_jump: false,
             fullscreen: false,

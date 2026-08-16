@@ -73,7 +73,7 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                         Sense::click_and_drag(),
                     );
                     draw(app, ui, canvas, px_per_frame);
-                    handle_reorder_drag(app, ui, &response, canvas, px_per_frame);
+                    handle_drag(app, ui, &response, canvas, px_per_frame);
                     handle_click(app, &response, canvas, px_per_frame);
                     canvas
                 });
@@ -160,12 +160,22 @@ fn wheel_input(app: &mut RoughcutApp, ui: &egui::Ui, rect: Rect, total: i64, usa
     app.timeline_scroll_to = Some(target);
 }
 
-/// Drag a clip along the timeline to reorder it.
+/// The band the clip blocks occupy. Above it is the ruler, below it is empty.
+fn is_on_blocks(y: f32, canvas: Rect) -> bool {
+    y >= canvas.top() + BLOCK_TOP && y <= canvas.top() + BLOCK_TOP + BLOCK_HEIGHT
+}
+
+/// Dragging the timeline: on a clip it moves the clip, anywhere else it
+/// scrubs.
+///
+/// Splitting by where the drag *starts* means the two gestures never compete —
+/// the ruler is a scrub strip and the blocks are objects you can pick up, and
+/// neither has to guess at the other's intent.
 ///
 /// Handled on the canvas rather than with a widget per block: one interactive
 /// region cannot fight with itself over which of two overlapping widgets got
 /// the click, and clicking to seek keeps working unchanged.
-fn handle_reorder_drag(
+fn handle_drag(
     app: &mut RoughcutApp,
     ui: &egui::Ui,
     response: &egui::Response,
@@ -177,10 +187,37 @@ fn handle_reorder_drag(
         tl::item_at(&app.project.timeline, frame).map(|(i, _)| i)
     };
 
+    // A horizontal-resize cursor over the ruler advertises that it scrubs.
+    if let Some(p) = response.hover_pos() {
+        if !is_on_blocks(p.y, canvas) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+    }
+
     if response.drag_started() {
-        app.dragging_item = response
-            .interact_pointer_pos()
-            .and_then(|p| index_at(app, p.x));
+        match response.interact_pointer_pos() {
+            Some(p) if is_on_blocks(p.y, canvas) => {
+                app.dragging_item = index_at(app, p.x);
+            }
+            Some(_) => app.scrubbing = true,
+            None => {}
+        }
+    }
+
+    // Scrubbing wins outright once started; the playhead follows the pointer
+    // for as long as the button is held.
+    if app.scrubbing {
+        if response.dragged() {
+            if let Some(p) = response.interact_pointer_pos() {
+                app.monitor.pause();
+                app.focus = Focus::Timeline;
+                app.set_position(frame_at_x(p.x, canvas, px_per_frame, app));
+            }
+        }
+        if response.drag_stopped() {
+            app.scrubbing = false;
+        }
+        return;
     }
 
     let Some(from) = app.dragging_item else {
