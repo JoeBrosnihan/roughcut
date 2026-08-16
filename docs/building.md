@@ -1,5 +1,28 @@
 # Building and installing
 
+The README is for people using Roughcut. This file, and the ones it indexes,
+are for people building or changing it.
+
+| Document | What is in it |
+| --- | --- |
+| building.md | This file: toolchain, dependencies, libmpv, stable vs dev |
+| [timing.md](timing.md) | The frame-exact timing model, and the bug measurement caught |
+| [mlt.md](mlt.md) | The MLT export: how the schema was derived, what is emitted |
+| [design.md](design.md) | Design pillars, crate layout, video integration, autosave |
+| [verification.md](verification.md) | Measured performance, the test suite, known gaps |
+| [deviations.md](deviations.md) | Every departure from the original brief, and why |
+| [licensing.md](licensing.md) | Why GPLv3, and what it means for releases |
+
+## Status
+
+| Target | State |
+| --- | --- |
+| `x86_64-pc-windows-msvc` | Built, run, measured |
+| `x86_64-apple-darwin` | Type-checks clean; never linked or run |
+| `aarch64-apple-darwin` | Type-checks clean; never linked or run |
+
+## Toolchain
+
 Requires a stable Rust toolchain. The workspace pins `eframe` 0.33, whose MSRV
 is 1.88.
 

@@ -1,95 +1,49 @@
 # Roughcut
 
-A keyboard-driven assembly editor. Ingest a folder of video, review it fast,
-mark in/out points, assemble an ordered sequence, trim it, and export a `.mlt`
-project that Shotcut opens with every cut on the exact intended frame.
+Assemble a rough cut fast, then finish it in Shotcut.
 
-That is the entire product. No effects, no transitions, no audio mixing, no
-titles, no second video track, and it cannot render video. Export is one-way:
-Roughcut writes MLT, it never reads it. The value is in what it refuses to do.
+Point Roughcut at a folder of video, skim it, mark the good bits, and build an
+ordered sequence. Export a `.mlt` project that Shotcut opens with every cut
+exactly where you put it.
 
-## Design pillars
+It is deliberately small: no effects, transitions, audio mixing, titles, or a
+second video track, and it cannot render video. Those are Shotcut's job. This is
+the part before them — mostly watching and choosing.
 
-**1. Simplicity.** Every feature is a liability. Ambiguity resolves toward
-removal. New options, modes and settings are the failure mode to watch for —
-each one doubles the states the tool can be in, and Roughcut is only useful
-while it stays a tool you can hold in your head.
+## What you need
 
-**2. Performance.** The tool disappears when it is fast and intrudes the moment
-it is not. Idle costs literally nothing. The budgets in
-[docs/verification.md](docs/verification.md) are acceptance criteria measured
-on real files, not aspirations.
+Windows 10 or 11, plus **[Shotcut](https://shotcut.org)** (it supplies `ffprobe`
+and `ffmpeg`, which Roughcut finds on its own — and you want it anyway to finish
+the edit) and **[mpv](https://mpv.io)** for playback. Without mpv everything
+still works except the picture.
 
-Where they conflict, simplicity wins unless the cost is one you would feel on
-every keypress.
+## Using it
 
-## Status
+Drop files on the window, or press `Ctrl+I`. The whole loop is three keys:
 
-| Target | State |
+| Key | Does |
 | --- | --- |
-| `x86_64-pc-windows-msvc` | Built, run, measured |
-| `x86_64-apple-darwin` | Type-checks clean; never linked or run |
-| `aarch64-apple-darwin` | Type-checks clean; never linked or run |
+| `I` | mark where a good bit starts |
+| `O` | mark where it ends |
+| `A` | append it to the timeline |
 
-Frame accuracy is verified end to end: the exported project is rendered through
-MLT and compared frame by frame against the source, and Shotcut itself opens
-the result with no complaints. See
-[docs/verification.md](docs/verification.md).
+Then repeat. `Space` plays, `←` `→` step a frame, `Tab` moves between the source
+and the timeline. `S` splits and `X` deletes and closes the gap — Shotcut's keys.
+Hover a thumbnail to skim that clip; click to open it at that moment. Drag clips
+onto the timeline, or along it to reorder; drag the ruler above them to scrub.
+**Press `?` for the full keyboard map**, or read [KEYS.md](KEYS.md).
 
-## Quickstart
+`Ctrl+E` exports a `.mlt`. Open it in Shotcut and finish there. The trip is
+one-way — Roughcut writes `.mlt` and never reads it — so treat it as a handoff,
+not a round trip. Your work is saved continuously and offered back after a
+crash.
 
-```
-cargo run --release -- path\to\clip.mp4     # run it
-cargo test --workspace                      # 89 tests
-.\tools\promote.ps1                         # keep a stable copy
-```
+## Building it, or changing it
 
-Needs `ffprobe` on `PATH` to import and **libmpv 2** to show video; both are
-found automatically if Shotcut or mpv is installed. Files named on the command
-line are opened at startup — a `.roughcut` file as a project, anything else as
-media to import.
-
-Press `?` in the app for the keyboard map, or read
-[KEYS.md](KEYS.md). The core loop is `I` → `O` → `A`: mark in, mark out,
-append to the timeline.
-
-## Documentation
-
-| Document | What is in it |
-| --- | --- |
-| [KEYS.md](KEYS.md) | The keyboard map. Generated from the code; a test fails if it drifts |
-| [docs/building.md](docs/building.md) | Building per platform, external dependencies, libmpv, installing a stable copy |
-| [docs/timing.md](docs/timing.md) | The frame-exact timing model, and the seek bug that measurement caught |
-| [docs/mlt.md](docs/mlt.md) | The MLT export: how the schema was derived and what is emitted |
-| [docs/design.md](docs/design.md) | Crate layout, video integration, autosave, undo |
-| [docs/verification.md](docs/verification.md) | Measured performance, the test suite, what still needs a human |
-| [docs/deviations.md](docs/deviations.md) | Every departure from the original brief, and why |
-| [docs/licensing.md](docs/licensing.md) | Why GPLv3, and what it means for releases |
-
-## Layout
-
-```
-crates/roughcut-core   model, timing, timeline ops, undo, ffprobe, MLT writer
-crates/roughcut-mpv    libmpv client + OpenGL render API bindings
-crates/roughcut-app    egui application
-```
-
-`roughcut-core` knows nothing about egui, mpv or threads, so the parts that
-must be correct are testable without a window or a GPU.
+Start with [docs/building.md](docs/building.md), which indexes the rest.
 
 ## Licence
 
-**GPL-3.0-or-later** — see [LICENSE](LICENSE) and [NOTICES.md](NOTICES.md).
-
-Chosen so a release can bundle libmpv, whose available Windows builds are GPL,
-into a single download. v3 specifically because `winit` and `glutin` are
-Apache-2.0, which is compatible with GPLv3 but not GPLv2.
-[docs/licensing.md](docs/licensing.md) has the reasoning.
-
-Issues and feature requests are welcome. Code contributions are not being
-accepted, which keeps the copyright undivided and relicensing possible.
-
-## Conventions
-
-This README stays **under 100 lines**. Anything longer belongs in `docs/` with
-a link from the table above.
+**GPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICES.md](NOTICES.md) and
+[docs/licensing.md](docs/licensing.md). Issues welcome; code contributions are
+not currently accepted.

@@ -1,5 +1,22 @@
 # Design notes
 
+## The two pillars
+
+**1. Simplicity.** Every feature is a liability. Ambiguity resolves toward
+removal. New options, modes and settings are the failure mode to watch for —
+each one doubles the states the tool can be in, and Roughcut is only useful
+while it stays a tool you can hold in your head. When this document calls
+something "deliberately naive", that is the point, not an apology.
+
+**2. Performance.** The tool disappears when it is fast and intrudes the moment
+it is not. Idle costs literally nothing, and the budgets in
+[verification.md](verification.md) were measured on real files rather than
+hoped for.
+
+Where they conflict, simplicity wins unless the performance cost is one the
+user would feel on every keypress. The frame-step fast path in
+[deviations.md](deviations.md) is the one place that trade was made explicitly.
+
 ## Crate layout
 
 ```
@@ -81,11 +98,13 @@ Measured idle CPU is unchanged at 0%.
 - One slot, not a directory of timestamped candidates. Roughcut edits one
   project in one window, so a second slot could only ever be a decision to put
   in front of the user.
-- Deleted the moment the work is safe: on save, on opening another project, or
-  on a clean exit with nothing unsaved.
-- Kept when you quit with unsaved changes. Next launch offers it once — `⏎` to
-  recover, `Esc` to discard. Recovering restores the work *unsaved*, so nothing
-  is overwritten behind you.
+- **Never deleted, only overwritten.** Deleting one is how work gets lost for
+  good; a file that is only ever replaced can always be reached again. It
+  carries an `unsaved` flag instead, cleared on save.
+- Only unsaved work interrupts startup. Next launch offers it once — `⏎` to
+  recover, `Esc` to discard — and File ▸ Recover last session reaches any
+  snapshot at any time, so dismissing the prompt is not final. Recovering
+  restores the work *unsaved*, so nothing is overwritten behind you.
 - While that prompt is up, key dispatch pauses and the snapshot is not
   overwritten, so nothing can destroy the work before you have answered.
 
