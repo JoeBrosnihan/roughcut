@@ -18,7 +18,7 @@ use roughcut_core::mlt::{self, ExportOptions};
 use roughcut_core::model::{ClipId, Project};
 use roughcut_core::probe::MediaInfo;
 use roughcut_core::project_io;
-use roughcut_core::time::{format_timecode, Rational};
+use roughcut_core::time::Rational;
 use roughcut_core::timeline;
 use roughcut_core::tools::{expand_drop, Tools};
 use roughcut_core::undo::History;
@@ -107,7 +107,9 @@ pub struct RoughcutApp {
     thumb_requested: HashSet<ClipId>,
     pub proxy_state: HashMap<ClipId, ProxyState>,
 
-    pub status: Option<(String, StatusKind)>,
+    /// Text for the alert bar, with when it was set. Info messages expire;
+    /// warnings and errors stay until the condition behind them clears.
+    pub status: Option<(String, StatusKind, std::time::Instant)>,
     pub show_help: bool,
     pub show_missing_tool: bool,
     pub missing_media: Vec<(ClipId, PathBuf)>,
@@ -213,7 +215,27 @@ impl RoughcutApp {
             StatusKind::Warn => log::warn!("{text}"),
             StatusKind::Info => log::info!("{text}"),
         }
-        self.status = Some((text, kind));
+        self.status = Some((text, kind, std::time::Instant::now()));
+    }
+
+    /// How long an informational message stays on screen. Long enough to read
+    /// a filename, short enough that the bar is not permanent furniture.
+    pub const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Drop an expired message, and say when to come back if one is still
+    /// counting down. Returns the repaint delay, if any.
+    fn expire_status(&mut self) -> Option<std::time::Duration> {
+        let (_, kind, at) = self.status.as_ref()?;
+        if *kind != StatusKind::Info {
+            return None;
+        }
+        let elapsed = at.elapsed();
+        if elapsed >= Self::STATUS_TTL {
+            self.status = None;
+            None
+        } else {
+            Some(Self::STATUS_TTL - elapsed)
+        }
     }
 
     /// Run an edit, snapshotting for undo only if it actually changed things.
@@ -564,18 +586,12 @@ impl RoughcutApp {
             Action::Undo => {
                 if self.history.undo(&mut self.project) {
                     self.after_history_change();
-                    self.set_status("undo", StatusKind::Info);
-                } else {
-                    self.set_status("nothing to undo", StatusKind::Info);
-                }
+                        }
             }
             Action::Redo => {
                 if self.history.redo(&mut self.project) {
                     self.after_history_change();
-                    self.set_status("redo", StatusKind::Info);
-                } else {
-                    self.set_status("nothing to redo", StatusKind::Info);
-                }
+                        }
             }
 
             Action::ToggleFocus => {
@@ -644,19 +660,7 @@ impl RoughcutApp {
                 }
             }
         });
-        if changed {
-            let fps = self.fps();
-            self.set_status(
-                match op {
-                    MarkOp::SetIn => format!("in at {}", format_timecode(frame, fps)),
-                    MarkOp::SetOut => format!("out at {}", format_timecode(frame, fps)),
-                    MarkOp::ClearIn => "in cleared".to_string(),
-                    MarkOp::ClearOut => "out cleared".to_string(),
-                    MarkOp::ClearBoth => "marks cleared".to_string(),
-                },
-                StatusKind::Info,
-            );
-        }
+        let _ = changed;
     }
 
     fn marked_range(&self) -> Option<(ClipId, i64, i64)> {
@@ -684,10 +688,6 @@ impl RoughcutApp {
             return;
         };
         if self.edit(|p| timeline::append(p, id, in_frame, out_frame)) {
-            self.set_status(
-                format!("appended {} frames", out_frame - in_frame + 1),
-                StatusKind::Info,
-            );
         }
     }
 
@@ -703,8 +703,6 @@ impl RoughcutApp {
             inserted_at.is_some()
         });
         if ok {
-            let n = o - i + 1;
-            self.set_status(format!("inserted {n} frames"), StatusKind::Info);
             self.selected_item =
                 timeline::item_at(&self.project.timeline, inserted_at.unwrap_or(at))
                     .map(|(idx, _)| idx);
@@ -734,10 +732,6 @@ impl RoughcutApp {
             self.set_position(at);
             self.selected_item =
                 timeline::item_at(&self.project.timeline, at).map(|(i, _)| i);
-            self.set_status(
-                format!("inserted {} frames", out_frame - in_frame + 1),
-                StatusKind::Info,
-            );
         }
     }
 
@@ -755,12 +749,6 @@ impl RoughcutApp {
         let at = self.playhead;
         if self.edit(|p| timeline::split_at(p, at)) {
             self.selected_item = None;
-            self.set_status("split", StatusKind::Info);
-        } else {
-            self.set_status(
-                "nothing to split — the playhead is already on a cut",
-                StatusKind::Info,
-            );
         }
     }
 
@@ -804,7 +792,7 @@ impl RoughcutApp {
             self.selected_clip = next;
             self.source_frame = 0;
             self.monitor.clear();
-            self.set_status(format!("removed {name}"), StatusKind::Info);
+            log::info!("removed {name}");
         }
     }
 
@@ -818,23 +806,12 @@ impl RoughcutApp {
         if lo == hi {
             return;
         }
-        if self.edit(|p| {
+        self.edit(|p| {
             let Some(c) = p.clip_mut(id) else { return false };
             c.mark_in = Some(lo);
             c.mark_out = Some(hi);
             true
-        }) {
-            let fps = self.fps();
-            self.set_status(
-                format!(
-                    "marked {} – {}  ({} frames)",
-                    format_timecode(lo, fps),
-                    format_timecode(hi, fps),
-                    hi - lo + 1
-                ),
-                StatusKind::Info,
-            );
-        }
+        });
     }
 
     fn ripple_delete(&mut self) {
@@ -844,7 +821,6 @@ impl RoughcutApp {
         };
         let start = timeline::item_start(&self.project.timeline, idx);
         if self.edit(|p| timeline::ripple_delete(p, idx)) {
-            self.set_status("clip deleted", StatusKind::Info);
             let last = timeline::last_frame(&self.project.timeline);
             self.playhead = start.min(last);
             self.selected_item = if self.project.timeline.is_empty() {
@@ -869,10 +845,6 @@ impl RoughcutApp {
             }
         });
         if ok {
-            self.set_status(
-                if head { "head trimmed" } else { "tail trimmed" },
-                StatusKind::Info,
-            );
             let last = timeline::last_frame(&self.project.timeline);
             if head {
                 // The clip start moved to where the playhead was.
@@ -895,7 +867,6 @@ impl RoughcutApp {
             let at = timeline::item_start(&self.project.timeline, to);
             self.focus = Focus::Timeline;
             self.set_position(at);
-            self.set_status("clip moved", StatusKind::Info);
         }
     }
 
@@ -913,7 +884,6 @@ impl RoughcutApp {
             let new_idx = moved_to.unwrap();
             self.selected_item = Some(new_idx);
             self.playhead = timeline::item_start(&self.project.timeline, new_idx);
-            self.set_status("clip moved", StatusKind::Info);
         }
     }
 
@@ -1052,7 +1022,7 @@ impl RoughcutApp {
         if n == 0 {
             self.set_status("nothing importable in that drop", StatusKind::Warn);
         } else {
-            self.set_status(format!("probing {n} file(s)…"), StatusKind::Info);
+            log::info!("probing {n} file(s)");
         }
     }
 
@@ -1312,12 +1282,9 @@ impl RoughcutApp {
             ImportOutcome::Duplicate(_) => false,
         });
         let Some(id) = new_id else {
-            self.set_status(
-                format!(
-                    "{} is already in the bin",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                ),
-                StatusKind::Info,
+            log::info!(
+                "{} is already in the bin",
+                path.file_name().unwrap_or_default().to_string_lossy()
             );
             return;
         };
@@ -1482,12 +1449,16 @@ impl eframe::App for RoughcutApp {
             self.last_title = title;
         }
 
-        // The ONLY unconditional-ish repaint: while the transport is running
-        // we need a tick per frame. Paused and idle, this is never reached, so
-        // the event loop goes back to `ControlFlow::Wait` and the process
-        // stops using CPU entirely.
+        // Scheduled repaints, and the only two of them. Both stop once the
+        // thing they are waiting on is done, so idle returns to no repaints at
+        // all and the process back to using no CPU.
         if let Some(interval) = self.monitor.repaint_interval() {
+            // A tick per frame while the transport is running.
             ctx.request_repaint_after(interval);
+        }
+        if let Some(remaining) = self.expire_status() {
+            // Come back when the message is due to disappear.
+            ctx.request_repaint_after(remaining);
         }
     }
 

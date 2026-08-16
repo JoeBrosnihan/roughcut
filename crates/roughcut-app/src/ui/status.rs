@@ -36,7 +36,7 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                     ui.label(egui::RichText::new(warning).color(theme::WARN));
                     sep(ui);
                 }
-                if let Some((text, kind)) = &app.status {
+                if let Some((text, kind, _)) = &app.status {
                     let color = match kind {
                         StatusKind::Info => theme::TEXT_DIM,
                         StatusKind::Warn => theme::WARN,
