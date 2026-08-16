@@ -6,7 +6,7 @@ members = ["crates/roughcut-core", "crates/roughcut-mpv", "crates/roughcut-app"]
 version = "0.8.0"
 edition = "2021"
 rust-version = "1.82"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 anyhow = "1.0"
