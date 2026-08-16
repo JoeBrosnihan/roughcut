@@ -1538,9 +1538,13 @@ impl RoughcutApp {
         }
         self.workers.submit(Job::Filmstrip {
             clip_id: id,
-            path: clip.path.clone(),
+            // The proxy when there is one: it is 540p, so every seek and
+            // decode is a fraction of the cost of the same work on the
+            // original, and it holds frame-for-frame the same picture.
+            path: clip.playback_path().to_path_buf(),
             duration_frames: clip.duration_frames,
             fps: self.project.fps(),
+            cache_dir: crate::settings::thumb_cache_dir(),
         });
     }
 

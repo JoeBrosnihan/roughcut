@@ -427,7 +427,7 @@ fn a_clip_exports_at_its_own_rate_when_the_project_works_in_another() {
     let dir = workdir("mixed");
 
     // Two files: 30 fps, and 60 fps holding the same four seconds.
-    let mut make = |name: &str, rate: i64, frames: i64| -> PathBuf {
+    let make = |name: &str, rate: i64, frames: i64| -> PathBuf {
         let out = dir.join(name);
         let status = quiet_command(&ffmpeg)
             .args(["-y", "-v", "error", "-f", "lavfi", "-i"])

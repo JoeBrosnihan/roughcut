@@ -169,3 +169,12 @@ which binary and which config directory it is using.
 | `RUST_LOG` | Log filter. The bin target is `roughcut`, so use `roughcut=debug` |
 | `ROUGHCUT_REGEN_KEYS` | Rewrite `KEYS.md` from the key table when running its test |
 | `ROUGHCUT_KEEP_OUTPUT` | Keep the frame-accuracy test's working files instead of deleting them |
+
+## The executable's icon
+
+`assets/icon.ico` is stamped into the Windows binary by
+`crates/roughcut-app/build.rs`, which shells out to the Windows SDK's `rc.exe`
+rather than pulling in a crate whose job is to locate `rc.exe`. No SDK means no
+icon and a build warning, never a failed build. `assets/icon.png` is the same
+artwork, compiled in and handed to the window at startup — the embedded
+resource covers Explorer and the shortcut, not the running window.

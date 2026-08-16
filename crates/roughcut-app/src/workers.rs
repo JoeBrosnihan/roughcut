@@ -40,6 +40,9 @@ pub enum Job {
         path: PathBuf,
         duration_frames: i64,
         fps: Rational,
+        /// Where finished sheets are kept between sessions. `None` disables
+        /// caching, which only happens if there is nowhere to write.
+        cache_dir: Option<PathBuf>,
     },
     Proxy {
         clip_id: ClipId,
@@ -254,9 +257,12 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             path,
             duration_frames,
             fps,
+            cache_dir,
         } => {
             let result = match &shared.tools.ffmpeg {
-                Some(ffmpeg) => make_filmstrip(ffmpeg, &path, duration_frames, fps),
+                Some(ffmpeg) => {
+                    make_filmstrip(ffmpeg, &path, duration_frames, fps, cache_dir.as_deref())
+                }
                 None => Err(anyhow::anyhow!("ffmpeg is not available")),
             };
             JobResult::Filmstrip { clip_id, result }
@@ -340,14 +346,155 @@ pub fn tile_for_frame(frame: i64, duration_frames: i64) -> usize {
 /// Each frame is a separate input-seek grab, which is near-instant regardless
 /// of how long the file is. A single ffmpeg call with an `fps` filter would be
 /// tidier but has to decode the whole file — minutes, for a long 4K interview.
+/// Identifies a cached sheet.
+///
+/// Everything that would change the picture goes in: which file, the version
+/// of it on disk right now, and the shape of the sheet. A rotated or replaced
+/// source therefore misses rather than serving a stale strip, and no explicit
+/// invalidation is needed anywhere.
+fn cache_key(path: &std::path::Path, duration_frames: i64) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    duration_frames.hash(&mut h);
+    FILMSTRIP_FRAMES.hash(&mut h);
+    THUMB_WIDTH.hash(&mut h);
+    if let Ok(meta) = std::fs::metadata(path) {
+        meta.len().hash(&mut h);
+        if let Ok(t) = meta.modified() {
+            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                d.as_nanos().hash(&mut h);
+            }
+        }
+    }
+    format!("{:016x}", h.finish())
+}
+
+fn read_cached(file: &std::path::Path) -> Option<Filmstrip> {
+    let img = image::open(file).ok()?.to_rgba8();
+    Some(Filmstrip {
+        width: img.width() as usize,
+        height: img.height() as usize,
+        rgba: img.into_raw(),
+    })
+}
+
+/// One sheet of `FILMSTRIP_FRAMES` tiles for a clip.
+///
+/// Kept on disk between sessions. Reopening a project used to re-extract every
+/// thumbnail from scratch, which on a large bin is minutes of ffmpeg before
+/// the pictures appear; now it is a file read.
 fn make_filmstrip(
     ffmpeg: &std::path::Path,
     path: &std::path::Path,
     duration_frames: i64,
     fps: Rational,
+    cache_dir: Option<&std::path::Path>,
 ) -> Result<Filmstrip> {
-    let tiles: Vec<Option<image::RgbaImage>> = (0..FILMSTRIP_FRAMES)
-        .map(|i| grab_frame(ffmpeg, path, filmstrip_frame(i, duration_frames), fps).ok())
+    let cache_file = cache_dir.map(|d| d.join(format!("{}.png", cache_key(path, duration_frames))));
+    if let Some(file) = &cache_file {
+        if let Some(hit) = read_cached(file) {
+            return Ok(hit);
+        }
+    }
+
+    let frames: Vec<i64> = (0..FILMSTRIP_FRAMES)
+        .map(|i| filmstrip_frame(i, duration_frames))
+        .collect();
+
+    // One ffmpeg for the whole sheet. Twelve separate launches per clip cost
+    // more in process startup alone than the decoding did.
+    let sheet = match grab_sheet(ffmpeg, path, &frames, fps) {
+        Ok(sheet) => sheet,
+        // Odd files exist — a seek that lands nowhere makes `hstack` fail, and
+        // it takes the whole sheet with it. Falling back frame by frame is
+        // slow but tolerates individual gaps, so a difficult clip still gets
+        // thumbnails rather than none.
+        Err(e) => {
+            log::debug!("single-pass filmstrip failed for {}: {e:#}", path.display());
+            stitch_individually(ffmpeg, path, &frames, fps)?
+        }
+    };
+
+    if let Some(file) = &cache_file {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = sheet.save(file) {
+            log::debug!("cannot cache filmstrip at {}: {e}", file.display());
+        }
+    }
+
+    Ok(Filmstrip {
+        width: sheet.width() as usize,
+        height: sheet.height() as usize,
+        rgba: sheet.into_raw(),
+    })
+}
+
+/// Every tile in a single ffmpeg run: one fast input seek per frame, scaled
+/// and stacked side by side by the filter graph.
+fn grab_sheet(
+    ffmpeg: &std::path::Path,
+    path: &std::path::Path,
+    frames: &[i64],
+    fps: Rational,
+) -> Result<image::RgbaImage> {
+    let n = frames.len();
+    let mut cmd = quiet_command(ffmpeg);
+    cmd.args(["-v", "error"]);
+    for &frame in frames {
+        // Input seek (`-ss` before `-i`) is orders of magnitude faster than
+        // output seek and is accurate enough for a bin thumbnail.
+        cmd.arg("-ss")
+            .arg(format!("{:.6}", frame_to_seconds(frame, fps)))
+            .arg("-i")
+            .arg(path);
+    }
+
+    let mut filter = String::new();
+    for i in 0..n {
+        // `setsar=1` so anamorphic sources cannot make the tiles disagree
+        // about shape, which `hstack` refuses to stack.
+        filter.push_str(&format!(
+            "[{i}:v]scale={THUMB_WIDTH}:-2:flags=fast_bilinear,setsar=1[t{i}];"
+        ));
+    }
+    for i in 0..n {
+        filter.push_str(&format!("[t{i}]"));
+    }
+    filter.push_str(&format!("hstack=inputs={n}[o]"));
+
+    cmd.args(["-filter_complex", &filter])
+        .args(["-map", "[o]", "-frames:v", "1"])
+        .args(["-f", "image2pipe", "-vcodec", "png", "-"]);
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        bail!(
+            "ffmpeg produced no filmstrip: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(
+        image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png)
+            .context("cannot decode the filmstrip ffmpeg produced")?
+            .to_rgba8(),
+    )
+}
+
+/// The slow path: one ffmpeg per tile, tolerating any that fail.
+fn stitch_individually(
+    ffmpeg: &std::path::Path,
+    path: &std::path::Path,
+    frames: &[i64],
+    fps: Rational,
+) -> Result<image::RgbaImage> {
+    let tiles: Vec<Option<image::RgbaImage>> = frames
+        .iter()
+        .map(|&f| grab_frame(ffmpeg, path, f, fps).ok())
         .collect();
 
     let first = tiles
@@ -359,7 +506,7 @@ fn make_filmstrip(
 
     // Anything that failed or came back an odd size is left black rather than
     // shifting every later tile along.
-    let mut sheet = image::RgbaImage::new(tw * FILMSTRIP_FRAMES as u32, th);
+    let mut sheet = image::RgbaImage::new(tw * frames.len() as u32, th);
     for (i, tile) in tiles.iter().enumerate() {
         let Some(img) = tile else { continue };
         if img.width() != tw || img.height() != th {
@@ -372,12 +519,7 @@ fn make_filmstrip(
             }
         }
     }
-
-    Ok(Filmstrip {
-        width: sheet.width() as usize,
-        height: sheet.height() as usize,
-        rgba: sheet.into_raw(),
-    })
+    Ok(sheet)
 }
 
 fn grab_frame(

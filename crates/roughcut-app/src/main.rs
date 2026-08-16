@@ -24,6 +24,20 @@ mod workers;
 
 use app::RoughcutApp;
 
+/// The application icon, decoded from the PNG built into the binary.
+fn window_icon() -> Option<std::sync::Arc<egui::IconData>> {
+    let png = include_bytes!("../../../assets/icon.png");
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .ok()?
+        .to_rgba8();
+    let (width, height) = (img.width(), img.height());
+    Some(std::sync::Arc::new(egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    }))
+}
+
 fn main() -> eframe::Result<()> {
     // The bin target is `roughcut`, so that — not the package name
     // `roughcut-app` — is the root of this crate's module paths, and is what
@@ -52,6 +66,11 @@ fn main() -> eframe::Result<()> {
         .with_title("Roughcut")
         .with_min_inner_size([960.0, 640.0])
         .with_drag_and_drop(true);
+    // The executable carries the same icon, but that only covers Explorer and
+    // the shortcut; the running window needs it handed over separately.
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     match saved {
         Some(w) => {
             viewport = viewport

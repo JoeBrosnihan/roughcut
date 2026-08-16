@@ -118,6 +118,15 @@ fn dev_config_dir() -> Option<PathBuf> {
 
 /// The single recovery snapshot. Beside `settings.json`, so it exists even for
 /// a project that has never been saved anywhere.
+/// Where bin filmstrips are kept between sessions.
+///
+/// Under the config directory, so a development build cannot serve or poison
+/// the cache of the copy you actually edit with — the same isolation the
+/// settings and the recovery snapshot get.
+pub fn thumb_cache_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("thumbnails"))
+}
+
 pub fn autosave_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("autosave.roughcut"))
 }

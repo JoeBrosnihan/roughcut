@@ -22,6 +22,11 @@ const TILE_W: f32 = 112.0;
 const THUMB_H: f32 = TILE_W * 9.0 / 16.0;
 const LABEL_H: f32 = 26.0;
 const TILE_H: f32 = THUMB_H + LABEL_H;
+/// Vertical distance from one row of tiles to the next.
+const ROW_PITCH: f32 = TILE_H + GAP;
+/// Points one wheel notch produces before any multiplier — egui's
+/// `line_scroll_speed` on native, which winit feeds one line per notch.
+const POINTS_PER_NOTCH: f32 = 40.0;
 
 pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
     egui::SidePanel::left("bin")
@@ -44,8 +49,28 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                 }
 
                 let ids: Vec<ClipId> = app.project.clips.iter().map(|c| c.id).collect();
+
+                // A wheel event is applied over several frames, and nothing in
+                // egui asks for the repaints that would finish the job. The
+                // event loop only wakes on input, so the tail of every flick
+                // was being stranded until something else happened to wake it
+                // — which is why a burst of notches never added up to what it
+                // should have. This costs frames only while the wheel is
+                // actually turning: the residual decays to nothing within
+                // about a tenth of a second, and then the repaints stop.
+                if ui.input(|i| i.smooth_scroll_delta) != egui::Vec2::ZERO {
+                    ui.ctx().request_repaint();
+                }
+
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    // One notch, one row. egui's default of 40 points is a
+                    // text-oriented figure that moves less than half a tile
+                    // here, so the wheel had to be hammered to get anywhere.
+                    // Deriving this from the row pitch rather than picking a
+                    // number keeps a notch landing on a row boundary whatever
+                    // the tiles are sized at.
+                    .wheel_scroll_multiplier(egui::Vec2::splat(ROW_PITCH / POINTS_PER_NOTCH))
                     .show(ui, |ui| grid(app, ui, &ids));
             });
         });
