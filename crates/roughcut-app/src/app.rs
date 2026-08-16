@@ -83,6 +83,11 @@ pub struct RoughcutApp {
     /// Pixels per frame; `zoom_fit` recomputes it from the panel width.
     pub zoom: f32,
     pub zoom_fit: bool,
+    /// Horizontal scroll of the timeline as of the last pass, and a position
+    /// to jump it to on the next one. Together these let a wheel zoom stay
+    /// anchored on the frame under the pointer instead of on the left edge.
+    pub timeline_offset: f32,
+    pub timeline_scroll_to: Option<f32>,
 
     pub thumbnails: HashMap<ClipId, egui::TextureHandle>,
     thumb_requested: HashSet<ClipId>,
@@ -143,6 +148,8 @@ impl RoughcutApp {
             selected_item: None,
             zoom: 0.5,
             zoom_fit: true,
+            timeline_offset: 0.0,
+            timeline_scroll_to: None,
             thumbnails: HashMap::new(),
             thumb_requested: HashSet::new(),
             proxy_state: HashMap::new(),
@@ -227,21 +234,25 @@ impl RoughcutApp {
         let Some(path) = self.autosave_path.clone() else {
             return;
         };
-        if let Err(e) =
-            project_io::write_autosave(&path, &self.project, self.project_path.as_deref())
-        {
+        if let Err(e) = project_io::write_autosave(
+            &path,
+            &self.project,
+            self.project_path.as_deref(),
+            self.dirty,
+        ) {
             // Never interrupt editing for this; the alert bar is enough.
             log::warn!("autosave failed: {e:#}");
             self.set_status(format!("autosave failed: {e}"), StatusKind::Warn);
         }
     }
 
-    /// Forget the recovery snapshot. Called once the work is safely in a real
-    /// project file, or once the user has declined to recover it.
-    fn discard_autosave(&mut self) {
+    /// Note that the snapshot no longer holds unsaved work. The file itself is
+    /// kept — nothing in Roughcut deletes a snapshot, so File > Recover last
+    /// session can always reach it, even after the prompt has been dismissed.
+    fn mark_autosave_saved(&mut self) {
         self.autosave_pending = false;
         if let Some(path) = &self.autosave_path {
-            project_io::clear_autosave(path);
+            project_io::mark_autosave_saved(path);
         }
     }
 
@@ -254,6 +265,9 @@ impl RoughcutApp {
         match project_io::read_autosave(path) {
             // An empty project is not worth interrupting startup for.
             Ok(s) if s.project.clips.is_empty() && s.project.timeline.is_empty() => None,
+            // A snapshot that was already saved is kept, but is not worth
+            // interrupting startup for; File > Recover last session reaches it.
+            Ok(s) if !s.unsaved => None,
             Ok(s) => Some(s),
             Err(e) => {
                 log::warn!("ignoring unreadable autosave: {e:#}");
@@ -289,9 +303,32 @@ impl RoughcutApp {
         );
     }
 
+    /// "Discard" on the prompt means "do not ask me again", not "destroy it".
     pub fn decline_recovery(&mut self) {
         self.recovery = None;
-        self.discard_autosave();
+        self.mark_autosave_saved();
+    }
+
+    /// Load the last session's snapshot on demand, whatever its state. This is
+    /// the way back if the startup prompt was dismissed, or if the work was
+    /// saved and then regretted.
+    pub fn recover_last_session(&mut self) {
+        let Some(path) = self.autosave_path.clone() else {
+            return;
+        };
+        match project_io::read_autosave(&path) {
+            Ok(snapshot) => {
+                self.recovery = Some(snapshot);
+            }
+            Err(e) => self.set_status(format!("no session to recover: {e}"), StatusKind::Warn),
+        }
+    }
+
+    /// Whether there is anything for File > Recover last session to offer.
+    pub fn has_recoverable_session(&self) -> bool {
+        self.autosave_path
+            .as_ref()
+            .is_some_and(|p| project_io::read_autosave(p).is_ok())
     }
 
     pub fn timeline_len(&self) -> i64 {
@@ -474,15 +511,7 @@ impl RoughcutApp {
             Action::Append => self.append_marked(),
             Action::Insert => self.insert_marked(),
 
-            Action::SelectUnderPlayhead => {
-                if self.focus == Focus::Timeline {
-                    self.selected_item =
-                        timeline::item_at(&self.project.timeline, self.playhead).map(|(i, _)| i);
-                    if self.selected_item.is_none() {
-                        self.set_status("no clip under the playhead", StatusKind::Warn);
-                    }
-                }
-            }
+            Action::Split => self.split(),
             Action::RippleDelete => self.ripple_delete(),
             Action::TrimHead => self.trim(true),
             Action::TrimTail => self.trim(false),
@@ -628,9 +657,62 @@ impl RoughcutApp {
         }
     }
 
+    /// Drop a bin clip onto the timeline at `frame`.
+    ///
+    /// Uses the clip's marked range, which defaults to the whole clip when
+    /// nothing is marked — the same range `V` would insert, so dragging and
+    /// the keyboard cannot disagree about what a clip means.
+    pub fn drop_clip_at(&mut self, clip_id: ClipId, frame: i64) {
+        let Some((in_frame, out_frame)) =
+            self.project.clip(clip_id).and_then(|c| c.marked_range())
+        else {
+            self.set_status("that clip has no usable range", StatusKind::Warn);
+            return;
+        };
+        let mut landed = None;
+        let ok = self.edit(|p| {
+            landed = timeline::insert_at(p, frame.max(0), clip_id, in_frame, out_frame);
+            landed.is_some()
+        });
+        if ok {
+            let at = landed.unwrap_or(0);
+            self.focus = Focus::Timeline;
+            self.set_position(at);
+            self.selected_item =
+                timeline::item_at(&self.project.timeline, at).map(|(i, _)| i);
+            self.set_status(
+                format!("inserted {} frames", out_frame - in_frame + 1),
+                StatusKind::Info,
+            );
+        }
+    }
+
+    /// Which timeline item an edit applies to: an explicit mouse selection if
+    /// there is one, otherwise whatever the playhead is sitting on. That
+    /// removes the need for a separate "select this" key — the playhead is
+    /// already pointing at what you mean.
+    fn target_item(&self) -> Option<usize> {
+        self.selected_item.or_else(|| {
+            timeline::item_at(&self.project.timeline, self.playhead).map(|(i, _)| i)
+        })
+    }
+
+    fn split(&mut self) {
+        let at = self.playhead;
+        if self.edit(|p| timeline::split_at(p, at)) {
+            self.selected_item = None;
+            self.set_status("split", StatusKind::Info);
+        } else {
+            self.set_status(
+                "nothing to split — the playhead is already on a cut",
+                StatusKind::Info,
+            );
+        }
+    }
+
     fn ripple_delete(&mut self) {
-        let Some(idx) = self.selected_item else {
-            self.set_status("no timeline clip selected — press X", StatusKind::Warn);
+        let Some(idx) = self.target_item() else {
+            self.set_status("no clip under the playhead", StatusKind::Warn);
             return;
         };
         let start = timeline::item_start(&self.project.timeline, idx);
@@ -647,8 +729,8 @@ impl RoughcutApp {
     }
 
     fn trim(&mut self, head: bool) {
-        let Some(idx) = self.selected_item else {
-            self.set_status("no timeline clip selected — press X", StatusKind::Warn);
+        let Some(idx) = self.target_item() else {
+            self.set_status("no clip under the playhead", StatusKind::Warn);
             return;
         };
         let at = self.playhead;
@@ -680,8 +762,8 @@ impl RoughcutApp {
     }
 
     fn move_selected(&mut self, delta: isize) {
-        let Some(idx) = self.selected_item else {
-            self.set_status("no timeline clip selected — press X", StatusKind::Warn);
+        let Some(idx) = self.target_item() else {
+            self.set_status("no clip under the playhead", StatusKind::Warn);
             return;
         };
         let mut moved_to = None;
@@ -822,9 +904,10 @@ impl RoughcutApp {
         match project_io::load(&path) {
             Ok(project) => {
                 // Opening a project is an explicit choice to work on that
-                // instead, so any leftover recovery snapshot goes with it.
+                // instead. The previous snapshot is not destroyed, only
+                // superseded on the next edit.
                 self.recovery = None;
-                self.discard_autosave();
+                self.mark_autosave_saved();
                 self.project = project;
                 self.history.clear();
                 self.project_path = Some(path.clone());
@@ -879,8 +962,9 @@ impl RoughcutApp {
                 }
                 self.project_path = Some(path.clone());
                 self.dirty = false;
-                // The work is in a real file now; there is nothing to recover.
-                self.discard_autosave();
+                // The work is in a real file now, so the snapshot no longer
+                // needs to prompt — but it is kept.
+                self.mark_autosave_saved();
                 self.set_status(format!("saved {}", path.display()), StatusKind::Info);
             }
             Err(e) => self.set_status(format!("{e:#}"), StatusKind::Error),
@@ -1226,15 +1310,12 @@ impl eframe::App for RoughcutApp {
         let _ = self.monitor.shutdown();
         self.settings.save();
 
-        // A clean exit with everything saved leaves nothing to recover.
-        // Quitting with unsaved changes deliberately leaves the snapshot
-        // behind — that is what makes closing the window by accident
-        // survivable, and why there is no "are you sure?" dialog to dismiss
-        // every time you quit on purpose.
-        if self.dirty {
-            self.flush_autosave();
-        } else {
-            self.discard_autosave();
-        }
+        // The snapshot is always left behind, marked according to whether it
+        // holds unsaved work. Quitting dirty prompts on next launch; quitting
+        // clean does not, but the session is still reachable from File. That
+        // is why there is no "are you sure?" dialog to dismiss every time you
+        // quit on purpose.
+        self.autosave_pending = true;
+        self.flush_autosave();
     }
 }

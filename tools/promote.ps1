@@ -45,6 +45,19 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 
+# A running dev build holds target\release\roughcut.exe open, and the linker
+# then fails with an error that says nothing about why. Say it plainly instead.
+$running = @(Get-Process roughcut -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path.StartsWith($repo, 'OrdinalIgnoreCase') })
+if ($running) {
+    Write-Host "A dev build is running and holds the binary open:" -ForegroundColor Yellow
+    $running | ForEach-Object { Write-Host "  pid $($_.Id)  $($_.Path)" }
+    $answer = Read-Host "Stop it and continue? [y/N]"
+    if ($answer -notmatch '^[Yy]') { throw "promotion cancelled" }
+    $running | Stop-Process -Force
+    Start-Sleep -Milliseconds 500
+}
+
 Write-Host "Building release..." -ForegroundColor Cyan
 Push-Location $repo
 try {
@@ -83,13 +96,30 @@ if (Test-Path (Join-Path $Dest 'roughcut.exe')) {
 Move-Item $staged (Join-Path $Dest 'roughcut.exe')
 Copy-Item $mpv.FullName (Join-Path $Dest 'libmpv-2.dll') -Force
 
-# Record what this build was, so you can tell it from a later one.
+# Record what this build was, so you can tell it from a later one and get back
+# to its source. The git description is the useful part — the crate version
+# rarely moves, but the tag and commit identify the build exactly.
 $version = (Select-String -Path (Join-Path $repo 'Cargo.toml') -Pattern '^version\s*=\s*"(.+)"' |
     Select-Object -First 1).Matches[0].Groups[1].Value
+$describe = 'not a git repository'
+Push-Location $repo
+try {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $d = & git describe --tags --always --dirty 2>$null
+    $ErrorActionPreference = $prev
+    if ($LASTEXITCODE -eq 0 -and $d) { $describe = $d.Trim() }
+} finally {
+    Pop-Location
+}
+if ($describe -like '*-dirty') {
+    Write-Host "WARNING: promoting a dirty tree - '$describe' does not identify this build" -ForegroundColor Yellow
+}
 $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm'
 @"
 Roughcut $version
-installed $stamp
+source    $describe
+promoted  $stamp
 from      $repo
 "@ | Set-Content (Join-Path $Dest 'VERSION.txt') -Encoding utf8
 

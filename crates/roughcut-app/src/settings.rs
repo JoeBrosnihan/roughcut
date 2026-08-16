@@ -37,14 +37,24 @@ impl Default for Settings {
 
 /// Where settings and the recovery snapshot live.
 ///
-/// `ROUGHCUT_CONFIG_DIR` overrides the location entirely. That is what keeps a
-/// development build from writing over the settings and autosave of the copy
-/// you actually use: `.cargo/config.toml` points anything launched through
-/// cargo at a scratch directory under `target/`, while an installed binary,
-/// run directly, keeps using the real one.
+/// A dev build must never touch the settings or — far worse — the recovery
+/// snapshot of the promoted copy someone is actually editing in. Three layers,
+/// most specific first:
+///
+/// 1. `ROUGHCUT_CONFIG_DIR`, if set.
+/// 2. **Where the binary is.** An executable sitting in `target/debug` or
+///    `target/release` is by definition a dev build, however it was launched.
+///    Relying on `.cargo/config.toml` alone was not enough: it only applies to
+///    `cargo run`, so launching `target\release\roughcut.exe` directly — which
+///    is exactly what a test script does — silently shared production's state.
+/// 3. The platform's config directory, for a promoted binary living anywhere
+///    else.
 pub fn config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("ROUGHCUT_CONFIG_DIR") {
         return Some(PathBuf::from(dir));
+    }
+    if let Some(dev) = dev_config_dir() {
+        return Some(dev);
     }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
@@ -56,6 +66,22 @@ pub fn config_dir() -> Option<PathBuf> {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
     }?;
     Some(base.join("Roughcut"))
+}
+
+/// `<target>/dev-config` when this executable is running from a cargo build
+/// directory, otherwise `None`.
+fn dev_config_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let parent = exe.parent()?;
+    let profile = parent.file_name()?.to_str()?;
+    if profile != "debug" && profile != "release" {
+        return None;
+    }
+    let target = parent.parent()?;
+    if target.file_name()?.to_str()? != "target" {
+        return None;
+    }
+    Some(target.join("dev-config"))
 }
 
 /// The single recovery snapshot. Beside `settings.json`, so it exists even for
@@ -97,5 +123,37 @@ impl Settings {
         self.proxy_dir.clone().or_else(|| {
             roughcut_core::project_io::default_proxy_dir(project_path)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule that keeps a dev build away from production's state. Getting
+    /// this wrong once already cost a recovery snapshot.
+    #[test]
+    fn only_cargo_build_directories_count_as_dev() {
+        let cases = [
+            (r"C:\src\roughcut\target\release\roughcut.exe", true),
+            (r"C:\src\roughcut\target\debug\roughcut.exe", true),
+            (r"/home/j/roughcut/target/release/roughcut", true),
+            // A promoted copy, wherever it lives.
+            (r"C:\Users\j\AppData\Local\Programs\Roughcut\roughcut.exe", false),
+            (r"/usr/local/bin/roughcut", false),
+            // Near misses that must not be mistaken for a build directory.
+            (r"C:\target\roughcut.exe", false),
+            (r"C:\apps\release\roughcut.exe", false),
+            (r"C:\target\staging\roughcut.exe", false),
+        ];
+        for (path, expect_dev) in cases {
+            let p = PathBuf::from(path);
+            let is_dev = p.parent().is_some_and(|parent| {
+                let profile = parent.file_name().and_then(|s| s.to_str());
+                let target = parent.parent().and_then(|t| t.file_name()).and_then(|s| s.to_str());
+                matches!(profile, Some("debug") | Some("release")) && target == Some("target")
+            });
+            assert_eq!(is_dev, expect_dev, "{path}");
+        }
     }
 }

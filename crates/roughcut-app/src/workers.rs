@@ -294,6 +294,14 @@ pub fn filmstrip_frame(tile: usize, duration_frames: i64) -> i64 {
     ((tile as i64 * 2 + 1) * last) / (n * 2)
 }
 
+/// Which tile best represents `frame`. The inverse of `filmstrip_frame`, used
+/// to paint timeline blocks with the picture at that point in the clip.
+pub fn tile_for_frame(frame: i64, duration_frames: i64) -> usize {
+    let last = (duration_frames - 1).max(1);
+    let t = (frame.clamp(0, last) as f64) / last as f64;
+    ((t * FILMSTRIP_FRAMES as f64) as usize).min(FILMSTRIP_FRAMES - 1)
+}
+
 /// Sample `FILMSTRIP_FRAMES` frames across the clip and lay them out in one
 /// horizontal sheet.
 ///
@@ -449,6 +457,18 @@ mod tests {
         assert!(frames[0] > 0, "tile 0 sampled frame {}", frames[0]);
         assert!(frames.windows(2).all(|w| w[0] < w[1]), "{frames:?}");
         assert!(*frames.last().unwrap() <= last);
+    }
+
+    #[test]
+    fn tile_lookup_inverts_tile_sampling() {
+        // Every tile's own sample frame must map back to that tile.
+        for i in 0..FILMSTRIP_FRAMES {
+            let f = filmstrip_frame(i, 300);
+            assert_eq!(tile_for_frame(f, 300), i, "tile {i} sampled frame {f}");
+        }
+        // Ends clamp rather than running off either side.
+        assert_eq!(tile_for_frame(-5, 300), 0);
+        assert_eq!(tile_for_frame(9999, 300), FILMSTRIP_FRAMES - 1);
     }
 
     #[test]

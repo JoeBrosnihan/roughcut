@@ -77,6 +77,34 @@ pub fn append(project: &mut Project, clip_id: ClipId, in_frame: i64, out_frame: 
     true
 }
 
+/// Cut the item under `frame` into two at that point, changing nothing about
+/// what the timeline plays — only where its boundaries are.
+///
+/// A no-op when the playhead is already on a cut, or past the end.
+pub fn split_at(project: &mut Project, frame: i64) -> bool {
+    let Some((index, offset)) = item_at(&project.timeline, frame) else {
+        return false;
+    };
+    if offset == 0 {
+        return false;
+    }
+    let existing = project.timeline[index];
+    project.timeline[index] = TimelineItem {
+        clip_id: existing.clip_id,
+        in_frame: existing.in_frame,
+        out_frame: existing.in_frame + offset - 1,
+    };
+    project.timeline.insert(
+        index + 1,
+        TimelineItem {
+            clip_id: existing.clip_id,
+            in_frame: existing.in_frame + offset,
+            out_frame: existing.out_frame,
+        },
+    );
+    true
+}
+
 /// Insert a marked source range at `playhead`, rippling everything after it.
 /// Splits the item under the playhead when the playhead is mid-clip.
 ///
@@ -98,26 +126,13 @@ pub fn insert_at(
         return Some(total);
     }
 
-    let (index, offset) = item_at(&project.timeline, playhead)?;
-    if offset == 0 {
-        // Exactly on a cut — no split needed.
-        project.timeline.insert(index, item);
-    } else {
-        let existing = project.timeline[index];
-        let head = TimelineItem {
-            clip_id: existing.clip_id,
-            in_frame: existing.in_frame,
-            out_frame: existing.in_frame + offset - 1,
-        };
-        let tail = TimelineItem {
-            clip_id: existing.clip_id,
-            in_frame: existing.in_frame + offset,
-            out_frame: existing.out_frame,
-        };
-        project.timeline[index] = head;
-        project.timeline.insert(index + 1, item);
-        project.timeline.insert(index + 2, tail);
-    }
+    // Make sure there is a boundary here, then insert at it. Splitting lives
+    // in one place so insert and the `S` key cannot disagree about it.
+    split_at(project, playhead);
+    let index = item_at(&project.timeline, playhead)
+        .map(|(i, _)| i)
+        .unwrap_or(project.timeline.len());
+    project.timeline.insert(index, item);
     Some(playhead)
 }
 
@@ -292,6 +307,38 @@ mod tests {
         assert_eq!((p.timeline[2].in_frame, p.timeline[2].out_frame), (40, 99));
         // No frames lost, ten gained.
         assert_eq!(total_frames(&p.timeline), 110);
+    }
+
+    #[test]
+    fn split_divides_a_clip_without_changing_what_plays() {
+        let (mut p, _) = project_with(&[(100, 199)]);
+        assert!(split_at(&mut p, 40));
+        assert_eq!(p.timeline.len(), 2);
+        assert_eq!((p.timeline[0].in_frame, p.timeline[0].out_frame), (100, 139));
+        assert_eq!((p.timeline[1].in_frame, p.timeline[1].out_frame), (140, 199));
+        // The defining property: nothing gained, nothing lost.
+        assert_eq!(total_frames(&p.timeline), 100);
+        assert_eq!(cut_points(&p.timeline), vec![0, 40, 100]);
+    }
+
+    #[test]
+    fn split_on_an_existing_cut_is_a_no_op() {
+        let (mut p, _) = project_with(&[(0, 49), (0, 49)]);
+        assert!(!split_at(&mut p, 0));
+        assert!(!split_at(&mut p, 50), "50 is already a boundary");
+        assert!(!split_at(&mut p, 100), "past the end");
+        assert_eq!(p.timeline.len(), 2);
+    }
+
+    #[test]
+    fn split_is_repeatable() {
+        let (mut p, _) = project_with(&[(0, 99)]);
+        assert!(split_at(&mut p, 50));
+        assert!(split_at(&mut p, 25));
+        assert!(split_at(&mut p, 75));
+        assert_eq!(p.timeline.len(), 4);
+        assert_eq!(total_frames(&p.timeline), 100);
+        assert_eq!(cut_points(&p.timeline), vec![0, 25, 50, 75, 100]);
     }
 
     #[test]

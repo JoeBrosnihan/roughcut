@@ -93,7 +93,16 @@ pub struct AutoSave {
     pub project_path: Option<PathBuf>,
     /// Seconds since the Unix epoch, so the prompt can say how old this is.
     pub saved_at: u64,
+    /// Whether this snapshot holds work that was never written to a project
+    /// file. Only a dirty snapshot is worth interrupting startup for — but a
+    /// clean one is still kept, so "recover last session" can always reach it.
+    #[serde(default = "yes")]
+    pub unsaved: bool,
     pub project: Project,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn now_unix() -> u64 {
@@ -103,11 +112,17 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn write_autosave(path: &Path, project: &Project, project_path: Option<&Path>) -> Result<()> {
+pub fn write_autosave(
+    path: &Path,
+    project: &Project,
+    project_path: Option<&Path>,
+    unsaved: bool,
+) -> Result<()> {
     let snapshot = AutoSave {
         version: SCHEMA_VERSION,
         project_path: project_path.map(Path::to_path_buf),
         saved_at: now_unix(),
+        unsaved,
         project: project.clone(),
     };
     let json = serde_json::to_string(&snapshot).context("cannot serialise the autosave")?;
@@ -127,11 +142,26 @@ pub fn read_autosave(path: &Path) -> Result<AutoSave> {
     Ok(snapshot)
 }
 
-pub fn clear_autosave(path: &Path) {
-    if path.exists() {
-        if let Err(e) = fs::remove_file(path) {
-            log::warn!("cannot remove {}: {e}", path.display());
+/// Mark the snapshot as no longer holding unsaved work, without destroying it.
+///
+/// Nothing in Roughcut deletes a snapshot. Deleting one is how work gets lost
+/// for good — a file that is only ever overwritten can always be reached
+/// again, even after the recovery prompt has been dismissed.
+pub fn mark_autosave_saved(path: &Path) {
+    let Ok(mut snapshot) = read_autosave(path) else {
+        return;
+    };
+    if !snapshot.unsaved {
+        return;
+    }
+    snapshot.unsaved = false;
+    match serde_json::to_string(&snapshot) {
+        Ok(json) => {
+            if let Err(e) = atomic_write(path, json.as_bytes()) {
+                log::warn!("cannot update {}: {e}", path.display());
+            }
         }
+        Err(e) => log::warn!("cannot update {}: {e}", path.display()),
     }
 }
 
@@ -263,10 +293,11 @@ mod tests {
         let p = sample();
         let original = PathBuf::from("/work/cut.roughcut");
 
-        write_autosave(&path, &p, Some(&original)).unwrap();
+        write_autosave(&path, &p, Some(&original), true).unwrap();
         let back = read_autosave(&path).unwrap();
         assert_eq!(back.project, p);
         assert_eq!(back.project_path, Some(original));
+        assert!(back.unsaved);
         assert!(autosave_age_secs(&back) < 5);
 
         let _ = fs::remove_dir_all(&dir);
@@ -276,21 +307,30 @@ mod tests {
     fn autosave_records_that_a_project_was_never_saved() {
         let dir = tmpdir("autosave-unsaved");
         let path = dir.join("autosave.roughcut");
-        write_autosave(&path, &sample(), None).unwrap();
+        write_autosave(&path, &sample(), None, true).unwrap();
         assert_eq!(read_autosave(&path).unwrap().project_path, None);
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The property that matters most: saving must not destroy the snapshot,
+    /// only stop it claiming to hold unsaved work.
     #[test]
-    fn clearing_an_autosave_is_idempotent() {
-        let dir = tmpdir("autosave-clear");
+    fn marking_saved_keeps_the_snapshot() {
+        let dir = tmpdir("autosave-mark");
         let path = dir.join("autosave.roughcut");
-        write_autosave(&path, &sample(), None).unwrap();
-        assert!(path.exists());
-        clear_autosave(&path);
-        assert!(!path.exists());
-        // Clearing one that is already gone must not complain.
-        clear_autosave(&path);
+        let p = sample();
+        write_autosave(&path, &p, None, true).unwrap();
+
+        mark_autosave_saved(&path);
+        assert!(path.exists(), "the snapshot must survive being marked saved");
+        let back = read_autosave(&path).unwrap();
+        assert!(!back.unsaved);
+        assert_eq!(back.project, p, "the work itself is untouched");
+
+        // Idempotent, and harmless when there is nothing there.
+        mark_autosave_saved(&path);
+        assert!(!read_autosave(&path).unwrap().unsaved);
+        mark_autosave_saved(&dir.join("nothing.roughcut"));
         let _ = fs::remove_dir_all(&dir);
     }
 

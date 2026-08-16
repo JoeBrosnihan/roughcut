@@ -40,11 +40,11 @@ act on whichever region currently has focus; press `Tab` to switch.
 
 | Key | Action | Scope |
 | --- | --- | --- |
-| `X` | Select the clip under the playhead | Timeline |
-| `Delete / Backspace` | Ripple delete the selected clip | Timeline |
-| `[` | Trim the head of the selected clip to the playhead | Timeline |
-| `]` | Trim the tail of the selected clip to the playhead | Timeline |
-| `Ctrl+Left / Ctrl+Right` | Move the selected clip one position earlier / later | Timeline |
+| `S` | Split at the playhead | Timeline |
+| `X  or  Delete` | Ripple delete, closing the gap | Timeline |
+| `[` | Trim the head of the clip to the playhead | Timeline |
+| `]` | Trim the tail of the clip to the playhead | Timeline |
+| `Ctrl+Left / Ctrl+Right` | Move the clip one position earlier / later | Timeline |
 
 ## File
 

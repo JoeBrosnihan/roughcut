@@ -84,9 +84,9 @@ fn map_key(key: Key, m: Modifiers) -> Option<Action> {
         Key::Enter => Some(Action::Append),
         Key::V => Some(Action::Insert),
 
-        // Timeline editing
-        Key::X => Some(Action::SelectUnderPlayhead),
-        Key::Delete | Key::Backspace => Some(Action::RippleDelete),
+        // Timeline editing. `S` and `X` match Shotcut, so the two tools agree.
+        Key::S => Some(Action::Split),
+        Key::X | Key::Delete | Key::Backspace => Some(Action::RippleDelete),
         Key::OpenBracket => Some(Action::TrimHead),
         Key::CloseBracket => Some(Action::TrimTail),
 
@@ -155,7 +155,16 @@ mod tests {
         assert_eq!(map_key(Key::O, plain()), Some(Action::MarkOut));
         assert_eq!(map_key(Key::O, shift()), Some(Action::ClearOut));
         assert_eq!(map_key(Key::X, shift()), Some(Action::ClearMarks));
-        assert_eq!(map_key(Key::X, plain()), Some(Action::SelectUnderPlayhead));
+        assert_eq!(map_key(Key::X, plain()), Some(Action::RippleDelete));
+    }
+
+    /// `S` and `X` deliberately match Shotcut, and `Ctrl+S` must still save.
+    #[test]
+    fn shotcut_timeline_keys() {
+        assert_eq!(map_key(Key::S, plain()), Some(Action::Split));
+        assert_eq!(map_key(Key::X, plain()), Some(Action::RippleDelete));
+        assert_eq!(map_key(Key::S, ctrl()), Some(Action::SaveProject));
+        assert_eq!(map_key(Key::S, ctrl_shift()), Some(Action::SaveProjectAs));
     }
 
     #[test]
@@ -213,7 +222,7 @@ mod tests {
             Action::ClearMarks,
             Action::Append,
             Action::Insert,
-            Action::SelectUnderPlayhead,
+            Action::Split,
             Action::RippleDelete,
             Action::TrimHead,
             Action::TrimTail,

@@ -43,18 +43,99 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
         });
 }
 
-fn header(app: &RoughcutApp, ui: &mut egui::Ui) {
-    let rect = ui
-        .allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover())
-        .0;
-    ui.painter().rect_filled(rect, CornerRadius::ZERO, theme::PANEL_ALT);
-    ui.painter().text(
-        rect.left_center() + egui::vec2(8.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        format!("BIN ({})", app.project.clips.len()),
-        egui::FontId::proportional(11.0),
-        theme::TEXT_DIM,
-    );
+/// The bin's header doubles as the application's only menu.
+///
+/// A dedicated menu bar would be a permanent row of chrome for something used
+/// a few times a session, and every pixel of chrome is a pixel not showing
+/// video. This row already existed, so the dropdown costs nothing.
+fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
+    use crate::actions::Action;
+
+    let rect = ui.max_rect();
+    let rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 22.0));
+    ui.painter()
+        .rect_filled(rect, CornerRadius::ZERO, theme::PANEL_ALT);
+
+    let mut action: Option<Action> = None;
+    let mut recover = false;
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.horizontal_centered(|ui| {
+            ui.add_space(4.0);
+            ui.menu_button("File", |ui| {
+                ui.set_min_width(190.0);
+                if menu_item(ui, "Import media…", "Ctrl+I") {
+                    action = Some(Action::Import);
+                }
+                ui.separator();
+                if menu_item(ui, "Open project…", "Ctrl+O") {
+                    action = Some(Action::OpenProject);
+                }
+                if menu_item(ui, "Save", "Ctrl+S") {
+                    action = Some(Action::SaveProject);
+                }
+                if menu_item(ui, "Save as…", "Ctrl+Shift+S") {
+                    action = Some(Action::SaveProjectAs);
+                }
+                ui.separator();
+                if menu_item(ui, "Export MLT XML…", "Ctrl+E") {
+                    action = Some(Action::ExportMlt);
+                }
+                ui.separator();
+                // Always reachable, so a dismissed startup prompt is never the
+                // last word on a session's work.
+                ui.add_enabled_ui(app.has_recoverable_session(), |ui| {
+                    if menu_item(ui, "Recover last session…", "") {
+                        recover = true;
+                    }
+                });
+                ui.separator();
+                if menu_item(ui, "Keyboard map", "?") {
+                    action = Some(Action::ToggleHelp);
+                }
+            });
+
+            ui.label(
+                egui::RichText::new(format!("BIN ({})", app.project.clips.len()))
+                    .size(11.0)
+                    .color(theme::TEXT_DIM),
+            );
+        });
+    });
+
+    if recover {
+        app.recover_last_session();
+        ui.close_kind(egui::UiKind::Menu);
+    }
+    if let Some(a) = action {
+        app.dispatch(a);
+        ui.close_kind(egui::UiKind::Menu);
+    }
+}
+
+/// A menu row with its keyboard equivalent shown on the right, so the menu
+/// teaches the shortcuts rather than replacing them.
+fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
+    let clicked = ui
+        .horizontal(|ui| {
+            let clicked = ui.selectable_label(false, label).clicked();
+            if !shortcut.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(shortcut)
+                            .monospace()
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+            }
+            clicked
+        })
+        .inner;
+    if clicked {
+        ui.close_kind(egui::UiKind::Menu);
+    }
+    clicked
 }
 
 fn empty_state(app: &mut RoughcutApp, ui: &mut egui::Ui) {
@@ -99,7 +180,7 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
 
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
-        Sense::click(),
+        Sense::click_and_drag(),
     );
     if !ui.is_rect_visible(rect) {
         return;
@@ -235,6 +316,24 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
         Some(ProxyState::Failed) => badge(painter, &mut badge_x, "PXY!", theme::ERROR),
         None if has_proxy => badge(painter, &mut badge_x, "PXY", theme::MARK_IN),
         None => {}
+    }
+
+    // Dragging a clip out of the bin carries its id; the timeline is the drop
+    // zone. egui keeps the payload alive until the pointer is released, and
+    // shows the grab cursor for us.
+    if response.drag_started() {
+        app.select_bin_clip(id);
+        egui::DragAndDrop::set_payload(ui.ctx(), id);
+    }
+    if response.dragged() {
+        // A hint that the drop target is elsewhere, drawn over the row being
+        // dragged so it is obvious which clip is in flight.
+        painter.rect_stroke(
+            rect,
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, theme::ACCENT),
+            StrokeKind::Inside,
+        );
     }
 
     if response.clicked() {

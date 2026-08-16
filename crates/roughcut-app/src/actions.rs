@@ -29,7 +29,7 @@ pub enum Action {
     Insert,
 
     // Timeline editing (timeline focus)
-    SelectUnderPlayhead,
+    Split,
     RippleDelete,
     TrimHead,
     TrimTail,
@@ -107,11 +107,11 @@ pub const KEY_MAP: &[Section] = &[
     Section {
         title: "Timeline editing",
         bindings: &[
-            Binding { keys: "X", description: "Select the clip under the playhead", scope: Scope::Timeline },
-            Binding { keys: "Delete / Backspace", description: "Ripple delete the selected clip", scope: Scope::Timeline },
-            Binding { keys: "[", description: "Trim the head of the selected clip to the playhead", scope: Scope::Timeline },
-            Binding { keys: "]", description: "Trim the tail of the selected clip to the playhead", scope: Scope::Timeline },
-            Binding { keys: "Ctrl+Left / Ctrl+Right", description: "Move the selected clip one position earlier / later", scope: Scope::Timeline },
+            Binding { keys: "S", description: "Split at the playhead", scope: Scope::Timeline },
+            Binding { keys: "X  or  Delete", description: "Ripple delete, closing the gap", scope: Scope::Timeline },
+            Binding { keys: "[", description: "Trim the head of the clip to the playhead", scope: Scope::Timeline },
+            Binding { keys: "]", description: "Trim the tail of the clip to the playhead", scope: Scope::Timeline },
+            Binding { keys: "Ctrl+Left / Ctrl+Right", description: "Move the clip one position earlier / later", scope: Scope::Timeline },
         ],
     },
     Section {
