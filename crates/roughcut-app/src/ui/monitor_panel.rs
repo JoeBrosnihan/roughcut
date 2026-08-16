@@ -248,7 +248,40 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
         ui.id().with("scrub"),
         Sense::click_and_drag(),
     );
-    if response.dragged() || response.clicked() {
+    // Shift-drag marks a range instead of scrubbing. It sets the same in and
+    // out points `I` and `O` do, so the mouse and the keyboard agree, and the
+    // marks are committed once on release rather than on every pixel.
+    let shift = ui.input(|i| i.modifiers.shift);
+    let marking = app.focus == Focus::Source && app.selected_clip.is_some();
+
+    if response.drag_started() && shift && marking {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let f = frame_at(pos, track, total);
+            app.mark_drag = Some((f, f));
+        }
+    }
+
+    if app.mark_drag.is_some() {
+        if response.dragged() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let f = frame_at(pos, track, total);
+                if let Some((_, cur)) = app.mark_drag.as_mut() {
+                    *cur = f;
+                }
+            }
+        }
+        // Preview the pending range; nothing is written to the project yet.
+        if let Some((a, b)) = app.mark_drag {
+            let span = Rect::from_min_max(
+                egui::pos2(x_of(a.min(b)), track.top() - 3.0),
+                egui::pos2(x_of(a.max(b)), track.bottom() + 3.0),
+            );
+            painter.rect_filled(span, CornerRadius::ZERO, theme::MARK_IN.linear_multiply(0.45));
+        }
+        if response.drag_stopped() {
+            app.commit_mark_drag();
+        }
+    } else if response.dragged() || response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             app.monitor.pause();
             app.set_position(frame_at(pos, track, total));

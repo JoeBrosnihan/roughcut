@@ -1,21 +1,32 @@
-//! The bin: a scrollable list of imported clips.
+//! The bin: a scrollable grid of clip thumbnails.
+//!
+//! A grid rather than a list because the picture is what identifies a clip;
+//! the filename rarely does. Hovering a tile scrubs it, which makes the grid a
+//! contact sheet you can skim rather than a table you have to read.
 
 use crate::app::{Focus, ProxyState, RoughcutApp};
 use crate::theme;
 use crate::ui::truncate_middle;
 use crate::workers;
-use egui::{CornerRadius, Sense, StrokeKind};
+use egui::{CornerRadius, Rect, Sense, StrokeKind};
 use roughcut_core::model::ClipId;
 use roughcut_core::time::format_timecode;
 
-pub const BIN_WIDTH: f32 = 240.0;
-const ROW_HEIGHT: f32 = 62.0;
-const THUMB_W: f32 = 88.0;
+pub const BIN_WIDTH: f32 = 250.0;
+const HEADER_H: f32 = 22.0;
+const GAP: f32 = 6.0;
+/// Tile width. Two columns at the default panel width; the panel is resizable,
+/// so widening it simply fits more.
+const TILE_W: f32 = 112.0;
+const THUMB_H: f32 = TILE_W * 9.0 / 16.0;
+const LABEL_H: f32 = 26.0;
+const TILE_H: f32 = THUMB_H + LABEL_H;
 
 pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
     egui::SidePanel::left("bin")
-        .exact_width(BIN_WIDTH)
-        .resizable(false)
+        .default_width(BIN_WIDTH)
+        .min_width(140.0)
+        .resizable(true)
         .frame(
             egui::Frame::new()
                 .fill(theme::PANEL)
@@ -34,13 +45,35 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                 let ids: Vec<ClipId> = app.project.clips.iter().map(|c| c.id).collect();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for id in ids {
-                            row(app, ui, id);
-                        }
-                    });
+                    .show(ui, |ui| grid(app, ui, &ids));
             });
         });
+}
+
+fn grid(app: &mut RoughcutApp, ui: &mut egui::Ui, ids: &[ClipId]) {
+    let avail = ui.available_width().max(TILE_W);
+    let cols = (((avail - GAP) / (TILE_W + GAP)).floor() as usize).max(1);
+    let rows = ids.len().div_ceil(cols);
+
+    let (area, _) = ui.allocate_exact_size(
+        egui::vec2(avail, rows as f32 * (TILE_H + GAP) + GAP),
+        Sense::hover(),
+    );
+
+    for (i, id) in ids.iter().enumerate() {
+        let (row, col) = (i / cols, i % cols);
+        let rect = Rect::from_min_size(
+            area.min
+                + egui::vec2(
+                    GAP + col as f32 * (TILE_W + GAP),
+                    GAP + row as f32 * (TILE_H + GAP),
+                ),
+            egui::vec2(TILE_W, TILE_H),
+        );
+        if ui.is_rect_visible(rect) {
+            tile(app, ui, *id, rect);
+        }
+    }
 }
 
 /// The bin's header doubles as the application's only menu.
@@ -52,7 +85,7 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     use crate::actions::Action;
 
     let rect = ui.max_rect();
-    let rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 22.0));
+    let rect = Rect::from_min_size(rect.min, egui::vec2(rect.width(), HEADER_H));
     ui.painter()
         .rect_filled(rect, CornerRadius::ZERO, theme::PANEL_ALT);
 
@@ -105,11 +138,9 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
 
     if recover {
         app.recover_last_session();
-        ui.close_kind(egui::UiKind::Menu);
     }
     if let Some(a) = action {
         app.dispatch(a);
-        ui.close_kind(egui::UiKind::Menu);
     }
 }
 
@@ -155,7 +186,7 @@ fn empty_state(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     });
 }
 
-fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
+fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let Some(clip) = app.project.clip(id) else {
         return;
     };
@@ -167,45 +198,30 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
     let missing = !clip.path.exists();
     let has_proxy = clip.proxy_path.as_ref().is_some_and(|p| p.exists());
     let marked = clip.mark_in.is_some() || clip.mark_out.is_some();
-    let mark_text = match (clip.mark_in, clip.mark_out) {
-        (None, None) => String::new(),
-        (i, o) => format!(
-            "[{} – {}]",
-            i.map(|v| v.to_string()).unwrap_or_else(|| "0".into()),
-            o.map(|v| v.to_string())
-                .unwrap_or_else(|| clip.last_frame().to_string())
-        ),
-    };
+    let path = clip.path.display().to_string();
     let proxy_state = app.proxy_state.get(&id).copied();
+    let uses = app.project.timeline_uses(id);
 
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_HEIGHT),
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("bin-tile", id)),
         Sense::click_and_drag(),
     );
-    if !ui.is_rect_visible(rect) {
-        return;
+    let thumb = Rect::from_min_size(rect.min, egui::vec2(rect.width(), THUMB_H));
+    let painter = ui.painter_at(rect);
+
+    if selected || response.hovered() {
+        painter.rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            if selected {
+                theme::CLIP_SELECTED
+            } else {
+                theme::PANEL_ALT
+            },
+        );
     }
-
-    let bg = if selected {
-        theme::CLIP_SELECTED
-    } else if response.hovered() {
-        theme::PANEL_ALT
-    } else {
-        theme::PANEL
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::ZERO, bg);
-    painter.line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
-        egui::Stroke::new(1.0, theme::LINE),
-    );
-
-    // Thumbnail
-    let thumb_rect = egui::Rect::from_min_size(
-        rect.min + egui::vec2(6.0, 6.0),
-        egui::vec2(THUMB_W, ROW_HEIGHT - 12.0),
-    );
-    painter.rect_filled(thumb_rect, CornerRadius::ZERO, theme::VIDEO_LETTERBOX);
+    painter.rect_filled(thumb, CornerRadius::ZERO, theme::VIDEO_LETTERBOX);
 
     // Hover-scrub: the pointer's horizontal position within the thumbnail
     // picks which of the filmstrip's tiles to show. The tiles were baked into
@@ -213,26 +229,25 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
     // nothing else — no decode, and no work at all once the pointer stops.
     let hover_x = response
         .hover_pos()
-        .filter(|p| thumb_rect.contains(*p))
-        .map(|p| ((p.x - thumb_rect.left()) / thumb_rect.width()).clamp(0.0, 1.0));
+        .filter(|p| thumb.contains(*p))
+        .map(|p| ((p.x - thumb.left()) / thumb.width()).clamp(0.0, 1.0));
     let tiles = workers::FILMSTRIP_FRAMES;
-    let tile = match hover_x {
+    let frame_tile = match hover_x {
         Some(t) => ((t * tiles as f32) as usize).min(tiles - 1),
         None => 0,
     };
 
     if let Some(tex) = app.thumbnails.get(&id) {
-        // The texture is the whole strip; one tile is a fraction of its width.
         let sheet = tex.size_vec2();
         let tile_size = egui::vec2(sheet.x / tiles as f32, sheet.y);
-        let scale = (thumb_rect.width() / tile_size.x).min(thumb_rect.height() / tile_size.y);
-        let draw = egui::Rect::from_center_size(thumb_rect.center(), tile_size * scale);
-        let u0 = tile as f32 / tiles as f32;
-        let u1 = (tile + 1) as f32 / tiles as f32;
+        let scale = (thumb.width() / tile_size.x).min(thumb.height() / tile_size.y);
+        let draw = Rect::from_center_size(thumb.center(), tile_size * scale);
+        let u0 = frame_tile as f32 / tiles as f32;
+        let u1 = (frame_tile + 1) as f32 / tiles as f32;
         painter.image(
             tex.id(),
             draw,
-            egui::Rect::from_min_max(egui::pos2(u0, 0.0), egui::pos2(u1, 1.0)),
+            Rect::from_min_max(egui::pos2(u0, 0.0), egui::pos2(u1, 1.0)),
             egui::Color32::WHITE,
         );
     }
@@ -240,52 +255,37 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
     // A scrubber line under the pointer, so it is obvious that the picture is
     // tracking the mouse rather than flickering.
     if let Some(t) = hover_x {
-        let x = thumb_rect.left() + t * thumb_rect.width();
+        let x = thumb.left() + t * thumb.width();
         painter.line_segment(
-            [
-                egui::pos2(x, thumb_rect.top()),
-                egui::pos2(x, thumb_rect.bottom()),
-            ],
+            [egui::pos2(x, thumb.top()), egui::pos2(x, thumb.bottom())],
             egui::Stroke::new(1.0, theme::PLAYHEAD),
         );
     }
 
-    // Text block
-    let text_x = thumb_rect.right() + 8.0;
-    let max_chars = 20;
+    // Duration on the picture, bottom right, the way every browser does it.
     painter.text(
-        egui::pos2(text_x, rect.top() + 10.0),
-        egui::Align2::LEFT_TOP,
-        truncate_middle(&name, max_chars),
-        egui::FontId::proportional(12.0),
-        if missing { theme::ERROR } else { theme::TEXT },
-    );
-    painter.text(
-        egui::pos2(text_x, rect.top() + 27.0),
-        egui::Align2::LEFT_TOP,
+        thumb.right_bottom() + egui::vec2(-3.0, -2.0),
+        egui::Align2::RIGHT_BOTTOM,
         duration,
-        egui::FontId::monospace(11.0),
-        theme::TEXT_DIM,
+        egui::FontId::monospace(10.0),
+        theme::TEXT,
     );
     if marked {
         painter.text(
-            egui::pos2(text_x, rect.top() + 42.0),
-            egui::Align2::LEFT_TOP,
-            mark_text,
-            egui::FontId::monospace(10.0),
+            thumb.left_bottom() + egui::vec2(3.0, -2.0),
+            egui::Align2::LEFT_BOTTOM,
+            "▮",
+            egui::FontId::proportional(10.0),
             theme::MARK_IN,
         );
     }
 
-    // Badges, right-aligned along the bottom edge.
-    let mut badge_x = rect.right() - 6.0;
-    let badge = |painter: &egui::Painter, x: &mut f32, text: &str, color: egui::Color32| {
-        let width = text.len() as f32 * 6.0 + 8.0;
-        let r = egui::Rect::from_min_size(
-            egui::pos2(*x - width, rect.bottom() - 18.0),
-            egui::vec2(width, 13.0),
-        );
-        painter.rect_filled(r, CornerRadius::ZERO, color.linear_multiply(0.25));
+    // Badges along the top of the picture.
+    let mut badge_x = thumb.left() + 3.0;
+    let mut badge = |text: &str, color: egui::Color32| {
+        let w = text.chars().count() as f32 * 5.5 + 6.0;
+        let r = Rect::from_min_size(egui::pos2(badge_x, thumb.top() + 3.0), egui::vec2(w, 12.0));
+        painter.rect_filled(r, CornerRadius::ZERO, egui::Color32::from_black_alpha(180));
         painter.rect_stroke(
             r,
             CornerRadius::ZERO,
@@ -299,35 +299,34 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
             egui::FontId::proportional(9.0),
             color,
         );
-        *x -= width + 4.0;
+        badge_x += w + 3.0;
     };
-
     if missing {
-        badge(painter, &mut badge_x, "MISSING", theme::ERROR);
+        badge("MISSING", theme::ERROR);
     }
     if rate_mismatch {
-        // §5 rule 5: a persistent warning that frame-exactness is not
-        // guaranteed for this clip.
-        badge(painter, &mut badge_x, "FPS", theme::WARN);
+        // §5 rule 5: frame-exactness is not guaranteed for this clip.
+        badge("FPS", theme::WARN);
     }
     match proxy_state {
-        Some(ProxyState::Queued) => badge(painter, &mut badge_x, "PXY…", theme::TEXT_DIM),
-        Some(ProxyState::Running) => badge(painter, &mut badge_x, "PXY▶", theme::ACCENT),
-        Some(ProxyState::Failed) => badge(painter, &mut badge_x, "PXY!", theme::ERROR),
-        None if has_proxy => badge(painter, &mut badge_x, "PXY", theme::MARK_IN),
+        Some(ProxyState::Queued) => badge("PXY…", theme::TEXT_DIM),
+        Some(ProxyState::Running) => badge("PXY▶", theme::ACCENT),
+        Some(ProxyState::Failed) => badge("PXY!", theme::ERROR),
+        None if has_proxy => badge("PXY", theme::MARK_IN),
         None => {}
     }
 
-    // Dragging a clip out of the bin carries its id; the timeline is the drop
-    // zone. egui keeps the payload alive until the pointer is released, and
-    // shows the grab cursor for us.
-    if response.drag_started() {
-        app.select_bin_clip(id);
-        egui::DragAndDrop::set_payload(ui.ctx(), id);
-    }
-    if response.dragged() {
-        // A hint that the drop target is elsewhere, drawn over the row being
-        // dragged so it is obvious which clip is in flight.
+    // Name below the picture.
+    let max_chars = ((rect.width() - 6.0) / 5.6).max(4.0) as usize;
+    painter.text(
+        egui::pos2(rect.left() + 3.0, thumb.bottom() + 4.0),
+        egui::Align2::LEFT_TOP,
+        truncate_middle(&name, max_chars),
+        egui::FontId::proportional(11.0),
+        if missing { theme::ERROR } else { theme::TEXT },
+    );
+
+    if selected {
         painter.rect_stroke(
             rect,
             CornerRadius::ZERO,
@@ -336,37 +335,83 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
         );
     }
 
+    // --- interaction --------------------------------------------------------
+
+    if response.drag_started() {
+        app.select_bin_clip(id);
+        egui::DragAndDrop::set_payload(ui.ctx(), id);
+    }
+    if response.dragged() {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, theme::ACCENT),
+            StrokeKind::Inside,
+        );
+    }
     if response.clicked() {
         app.select_bin_clip(id);
-        // Clicking the filmstrip opens the clip *at the frame under the
+        // Clicking the picture opens the clip *at the frame under the
         // pointer*, so skimming to a moment and landing on it is one gesture.
-        // Clicking the text just selects, as before.
         if let Some(t) = response
             .interact_pointer_pos()
-            .filter(|p| thumb_rect.contains(*p))
-            .map(|p| ((p.x - thumb_rect.left()) / thumb_rect.width()).clamp(0.0, 1.0))
+            .filter(|p| thumb.contains(*p))
+            .map(|p| ((p.x - thumb.left()) / thumb.width()).clamp(0.0, 1.0))
         {
             app.focus = Focus::Source;
             let last = (duration_frames - 1).max(0);
             app.set_position((t * last as f32).round() as i64);
         }
     }
-    if missing && response.double_clicked() {
+    if response.double_clicked() {
+        if missing {
+            // A clip that cannot be found has nothing to append yet.
+            app.relink_dialog(id);
+        } else {
+            app.select_bin_clip(id);
+            app.append_clip(id);
+        }
+    }
+
+    let mut remove = false;
+    let mut relink = false;
+    response.context_menu(|ui| {
+        ui.set_min_width(170.0);
+        if missing && ui.button("Relink…").clicked() {
+            relink = true;
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        ui.add_enabled_ui(uses == 0, |ui| {
+            if ui.button("Remove from bin").clicked() {
+                remove = true;
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        });
+        if uses > 0 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "used by {uses} cut{} on the timeline",
+                    if uses == 1 { "" } else { "s" }
+                ))
+                .small()
+                .color(theme::TEXT_DIM),
+            );
+        }
+    });
+    if relink {
         app.relink_dialog(id);
     }
-    let response = response.on_hover_text(format!(
-        "{}\n{}\n{} frames{}",
-        name,
-        app.project
-            .clip(id)
-            .map(|c| c.path.display().to_string())
-            .unwrap_or_default(),
-        app.project.clip(id).map(|c| c.duration_frames).unwrap_or(0),
+    if remove {
+        app.select_bin_clip(id);
+        app.remove_selected_clip();
+    }
+
+    response.on_hover_text(format!(
+        "{name}\n{path}\n{duration_frames} frames{}",
         if rate_mismatch {
             "\nframe rate differs from the project — MLT will resample"
         } else {
             ""
         }
     ));
-    let _ = response;
 }

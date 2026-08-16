@@ -440,6 +440,22 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_bin_clip_refuses_while_the_timeline_uses_it() {
+        let (mut p, id) = project_with(&[(0, 9), (0, 19)]);
+        assert_eq!(p.timeline_uses(id), 2);
+        assert!(!p.remove_clip(id), "must refuse while cuts reference it");
+        assert_eq!(p.clips.len(), 1);
+
+        // Once the cuts are gone it can go.
+        p.timeline.clear();
+        assert_eq!(p.timeline_uses(id), 0);
+        assert!(p.remove_clip(id));
+        assert!(p.clips.is_empty());
+        // And removing it twice is not an error worth reporting differently.
+        assert!(!p.remove_clip(id));
+    }
+
+    #[test]
     fn last_frame_of_empty_timeline_is_zero() {
         let p = Project::new();
         assert_eq!(last_frame(&p.timeline), 0);

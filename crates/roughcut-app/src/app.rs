@@ -90,6 +90,10 @@ pub struct RoughcutApp {
     pub timeline_scroll_to: Option<f32>,
     /// Timeline item being dragged to a new position, if any.
     pub dragging_item: Option<usize>,
+    /// A shift-drag in progress on the source scrub bar, as (anchor, current)
+    /// source frames. Marks are only committed on release, so the drag costs
+    /// one undo entry rather than one per pixel.
+    pub mark_drag: Option<(i64, i64)>,
     /// Mirrors the viewport's fullscreen state, so F11 toggles rather than
     /// guessing. `fullscreen_pending` defers the actual viewport command to
     /// `update`, which is the only place with a `Context` to send it on.
@@ -158,6 +162,7 @@ impl RoughcutApp {
             timeline_offset: 0.0,
             timeline_scroll_to: None,
             dragging_item: None,
+            mark_drag: None,
             fullscreen: false,
             fullscreen_pending: false,
             thumbnails: HashMap::new(),
@@ -522,7 +527,11 @@ impl RoughcutApp {
             Action::Insert => self.insert_marked(),
 
             Action::Split => self.split(),
-            Action::RippleDelete => self.ripple_delete(),
+            // Delete removes whatever is in the region you are looking at.
+            Action::RippleDelete => match self.focus {
+                Focus::Source => self.remove_selected_clip(),
+                Focus::Timeline => self.ripple_delete(),
+            },
             Action::TrimHead => self.trim(true),
             Action::TrimTail => self.trim(false),
             Action::MoveEarlier => self.move_selected(-1),
@@ -638,13 +647,28 @@ impl RoughcutApp {
     }
 
     fn append_marked(&mut self) {
-        let Some((id, i, o)) = self.marked_range() else {
+        let Some(id) = self.selected_clip else {
             self.set_status("nothing marked to append", StatusKind::Warn);
             return;
         };
-        if self.edit(|p| timeline::append(p, id, i, o)) {
-            let n = o - i + 1;
-            self.set_status(format!("appended {n} frames"), StatusKind::Info);
+        self.append_clip(id);
+    }
+
+    /// Append a specific bin clip's marked range to the timeline — the range
+    /// `A` would append, so double-clicking a tile and pressing `A` do the
+    /// same thing.
+    pub fn append_clip(&mut self, id: ClipId) {
+        let Some((in_frame, out_frame)) =
+            self.project.clip(id).and_then(|c| c.marked_range())
+        else {
+            self.set_status("that clip has no usable range", StatusKind::Warn);
+            return;
+        };
+        if self.edit(|p| timeline::append(p, id, in_frame, out_frame)) {
+            self.set_status(
+                format!("appended {} frames", out_frame - in_frame + 1),
+                StatusKind::Info,
+            );
         }
     }
 
@@ -716,6 +740,79 @@ impl RoughcutApp {
         } else {
             self.set_status(
                 "nothing to split — the playhead is already on a cut",
+                StatusKind::Info,
+            );
+        }
+    }
+
+    /// Remove the selected clip from the bin.
+    pub fn remove_selected_clip(&mut self) {
+        let Some(id) = self.selected_clip else {
+            self.set_status("no clip selected in the bin", StatusKind::Warn);
+            return;
+        };
+        let uses = self.project.timeline_uses(id);
+        if uses > 0 {
+            self.set_status(
+                format!(
+                    "still used by {uses} cut{} on the timeline — delete those first",
+                    if uses == 1 { "" } else { "s" }
+                ),
+                StatusKind::Warn,
+            );
+            return;
+        }
+        let name = self
+            .project
+            .clip(id)
+            .map(|c| c.file_name())
+            .unwrap_or_default();
+        // Pick the neighbour to land on before the clip disappears.
+        let next = {
+            let i = self.project.clips.iter().position(|c| c.id == id);
+            i.and_then(|i| {
+                self.project
+                    .clips
+                    .get(i + 1)
+                    .or_else(|| if i > 0 { self.project.clips.get(i - 1) } else { None })
+            })
+            .map(|c| c.id)
+        };
+        if self.edit(|p| p.remove_clip(id)) {
+            self.thumbnails.remove(&id);
+            self.thumb_requested.remove(&id);
+            self.proxy_state.remove(&id);
+            self.selected_clip = next;
+            self.source_frame = 0;
+            self.monitor.clear();
+            self.set_status(format!("removed {name}"), StatusKind::Info);
+        }
+    }
+
+    /// Commit a shift-drag on the scrub bar as the clip's in and out points.
+    pub fn commit_mark_drag(&mut self) {
+        let Some((a, b)) = self.mark_drag.take() else {
+            return;
+        };
+        let Some(id) = self.selected_clip else { return };
+        let (lo, hi) = (a.min(b), a.max(b));
+        if lo == hi {
+            return;
+        }
+        if self.edit(|p| {
+            let Some(c) = p.clip_mut(id) else { return false };
+            c.mark_in = Some(lo);
+            c.mark_out = Some(hi);
+            true
+        }) {
+            let fps = self.fps();
+            self.set_status(
+                format!(
+                    "marked {} – {}  ({} frames)",
+                    format_timecode(lo, fps),
+                    format_timecode(hi, fps),
+                    hi - lo + 1
+                ),
                 StatusKind::Info,
             );
         }

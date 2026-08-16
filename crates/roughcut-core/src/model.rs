@@ -226,4 +226,21 @@ impl Project {
         self.clips.iter_mut().find(|c| c.id == id)
     }
 
+    /// How many cuts on the timeline come from this clip.
+    pub fn timeline_uses(&self, id: ClipId) -> usize {
+        self.timeline.iter().filter(|t| t.clip_id == id).count()
+    }
+
+    /// Drop a clip from the bin. Refuses while the timeline still references
+    /// it — removing it would silently take assembled work with it, and the
+    /// caller can explain that far more usefully than a bare `false` could.
+    pub fn remove_clip(&mut self, id: ClipId) -> bool {
+        if self.timeline_uses(id) > 0 {
+            return false;
+        }
+        let before = self.clips.len();
+        self.clips.retain(|c| c.id != id);
+        self.clips.len() != before
+    }
+
 }
