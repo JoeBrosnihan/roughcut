@@ -1,8 +1,9 @@
 //! The bin: a scrollable list of imported clips.
 
-use crate::app::{ProxyState, RoughcutApp};
+use crate::app::{Focus, ProxyState, RoughcutApp};
 use crate::theme;
 use crate::ui::truncate_middle;
+use crate::workers;
 use egui::{CornerRadius, Sense, StrokeKind};
 use roughcut_core::model::ClipId;
 use roughcut_core::time::format_timecode;
@@ -79,7 +80,8 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
     };
     let selected = app.selected_clip == Some(id);
     let name = clip.file_name();
-    let duration = format_timecode(clip.duration_frames, app.project.fps());
+    let duration_frames = clip.duration_frames;
+    let duration = format_timecode(duration_frames, app.project.fps());
     let rate_mismatch = clip.rate_mismatch;
     let missing = !clip.path.exists();
     let has_proxy = clip.proxy_path.as_ref().is_some_and(|p| p.exists());
@@ -123,15 +125,47 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
         egui::vec2(THUMB_W, ROW_HEIGHT - 12.0),
     );
     painter.rect_filled(thumb_rect, CornerRadius::ZERO, theme::VIDEO_LETTERBOX);
+
+    // Hover-scrub: the pointer's horizontal position within the thumbnail
+    // picks which of the filmstrip's tiles to show. The tiles were baked into
+    // one texture when the clip was imported, so this costs a UV offset and
+    // nothing else — no decode, and no work at all once the pointer stops.
+    let hover_x = response
+        .hover_pos()
+        .filter(|p| thumb_rect.contains(*p))
+        .map(|p| ((p.x - thumb_rect.left()) / thumb_rect.width()).clamp(0.0, 1.0));
+    let tiles = workers::FILMSTRIP_FRAMES;
+    let tile = match hover_x {
+        Some(t) => ((t * tiles as f32) as usize).min(tiles - 1),
+        None => 0,
+    };
+
     if let Some(tex) = app.thumbnails.get(&id) {
-        let size = tex.size_vec2();
-        let scale = (thumb_rect.width() / size.x).min(thumb_rect.height() / size.y);
-        let draw = egui::Rect::from_center_size(thumb_rect.center(), size * scale);
+        // The texture is the whole strip; one tile is a fraction of its width.
+        let sheet = tex.size_vec2();
+        let tile_size = egui::vec2(sheet.x / tiles as f32, sheet.y);
+        let scale = (thumb_rect.width() / tile_size.x).min(thumb_rect.height() / tile_size.y);
+        let draw = egui::Rect::from_center_size(thumb_rect.center(), tile_size * scale);
+        let u0 = tile as f32 / tiles as f32;
+        let u1 = (tile + 1) as f32 / tiles as f32;
         painter.image(
             tex.id(),
             draw,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Rect::from_min_max(egui::pos2(u0, 0.0), egui::pos2(u1, 1.0)),
             egui::Color32::WHITE,
+        );
+    }
+
+    // A scrubber line under the pointer, so it is obvious that the picture is
+    // tracking the mouse rather than flickering.
+    if let Some(t) = hover_x {
+        let x = thumb_rect.left() + t * thumb_rect.width();
+        painter.line_segment(
+            [
+                egui::pos2(x, thumb_rect.top()),
+                egui::pos2(x, thumb_rect.bottom()),
+            ],
+            egui::Stroke::new(1.0, theme::PLAYHEAD),
         );
     }
 
@@ -205,6 +239,18 @@ fn row(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId) {
 
     if response.clicked() {
         app.select_bin_clip(id);
+        // Clicking the filmstrip opens the clip *at the frame under the
+        // pointer*, so skimming to a moment and landing on it is one gesture.
+        // Clicking the text just selects, as before.
+        if let Some(t) = response
+            .interact_pointer_pos()
+            .filter(|p| thumb_rect.contains(*p))
+            .map(|p| ((p.x - thumb_rect.left()) / thumb_rect.width()).clamp(0.0, 1.0))
+        {
+            app.focus = Focus::Source;
+            let last = (duration_frames - 1).max(0);
+            app.set_position((t * last as f32).round() as i64);
+        }
     }
     if missing && response.double_clicked() {
         app.relink_dialog(id);

@@ -18,19 +18,26 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
-/// Bin thumbnail width in pixels. Small on purpose: 50 clips of these must fit
-/// inside the 300 MB RSS budget alongside everything else.
-pub const THUMB_WIDTH: u32 = 128;
+/// Width of one filmstrip tile, in pixels. Small on purpose: 50 clips of these
+/// must fit inside the 300 MB RSS budget alongside everything else.
+pub const THUMB_WIDTH: u32 = 96;
+
+/// Frames sampled across each clip for hover-scrubbing in the bin.
+///
+/// They are baked into one horizontal sheet per clip rather than fetched as
+/// the pointer moves. Hovering then costs a UV offset and nothing else — no
+/// decode, no I/O, no work while the pointer is still.
+pub const FILMSTRIP_FRAMES: usize = 12;
 
 #[derive(Debug, Clone)]
 pub enum Job {
     Probe {
         path: PathBuf,
     },
-    Thumbnail {
+    Filmstrip {
         clip_id: ClipId,
         path: PathBuf,
-        frame: i64,
+        duration_frames: i64,
         fps: Rational,
     },
     Proxy {
@@ -41,16 +48,18 @@ pub enum Job {
     },
 }
 
-/// A decoded thumbnail, kept UI-framework-free so workers never touch egui.
-pub struct ThumbData {
+/// `FILMSTRIP_FRAMES` tiles laid out left to right in one image. Kept
+/// UI-framework-free so workers never touch egui.
+pub struct Filmstrip {
+    /// Width of the whole sheet, i.e. one tile times `FILMSTRIP_FRAMES`.
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
 }
 
-impl std::fmt::Debug for ThumbData {
+impl std::fmt::Debug for Filmstrip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ThumbData")
+        f.debug_struct("Filmstrip")
             .field("width", &self.width)
             .field("height", &self.height)
             .field("bytes", &self.rgba.len())
@@ -64,9 +73,9 @@ pub enum JobResult {
         path: PathBuf,
         result: Result<MediaInfo>,
     },
-    Thumbnail {
+    Filmstrip {
         clip_id: ClipId,
-        result: Result<ThumbData>,
+        result: Result<Filmstrip>,
     },
     ProxyStarted {
         clip_id: ClipId,
@@ -228,17 +237,17 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             };
             JobResult::Probed { path, result }
         }
-        Job::Thumbnail {
+        Job::Filmstrip {
             clip_id,
             path,
-            frame,
+            duration_frames,
             fps,
         } => {
             let result = match &shared.tools.ffmpeg {
-                Some(ffmpeg) => make_thumbnail(ffmpeg, &path, frame, fps),
+                Some(ffmpeg) => make_filmstrip(ffmpeg, &path, duration_frames, fps),
                 None => Err(anyhow::anyhow!("ffmpeg is not available")),
             };
-            JobResult::Thumbnail { clip_id, result }
+            JobResult::Filmstrip { clip_id, result }
         }
         Job::Proxy {
             clip_id,
@@ -277,12 +286,66 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
 }
 
 /// One frame, scaled down, straight out of ffmpeg as a PNG on stdout.
-fn make_thumbnail(
+/// The frame sampled for tile `i`: the centre of the slice it represents, so
+/// tile 0 is not frame 0 — the first frame of a shot is very often black.
+pub fn filmstrip_frame(tile: usize, duration_frames: i64) -> i64 {
+    let last = (duration_frames - 1).max(0);
+    let n = FILMSTRIP_FRAMES as i64;
+    ((tile as i64 * 2 + 1) * last) / (n * 2)
+}
+
+/// Sample `FILMSTRIP_FRAMES` frames across the clip and lay them out in one
+/// horizontal sheet.
+///
+/// Each frame is a separate input-seek grab, which is near-instant regardless
+/// of how long the file is. A single ffmpeg call with an `fps` filter would be
+/// tidier but has to decode the whole file — minutes, for a long 4K interview.
+fn make_filmstrip(
+    ffmpeg: &std::path::Path,
+    path: &std::path::Path,
+    duration_frames: i64,
+    fps: Rational,
+) -> Result<Filmstrip> {
+    let tiles: Vec<Option<image::RgbaImage>> = (0..FILMSTRIP_FRAMES)
+        .map(|i| grab_frame(ffmpeg, path, filmstrip_frame(i, duration_frames), fps).ok())
+        .collect();
+
+    let first = tiles
+        .iter()
+        .flatten()
+        .next()
+        .context("ffmpeg produced no frames for this clip")?;
+    let (tw, th) = (first.width(), first.height());
+
+    // Anything that failed or came back an odd size is left black rather than
+    // shifting every later tile along.
+    let mut sheet = image::RgbaImage::new(tw * FILMSTRIP_FRAMES as u32, th);
+    for (i, tile) in tiles.iter().enumerate() {
+        let Some(img) = tile else { continue };
+        if img.width() != tw || img.height() != th {
+            continue;
+        }
+        let x0 = i as u32 * tw;
+        for y in 0..th {
+            for x in 0..tw {
+                sheet.put_pixel(x0 + x, y, *img.get_pixel(x, y));
+            }
+        }
+    }
+
+    Ok(Filmstrip {
+        width: sheet.width() as usize,
+        height: sheet.height() as usize,
+        rgba: sheet.into_raw(),
+    })
+}
+
+fn grab_frame(
     ffmpeg: &std::path::Path,
     path: &std::path::Path,
     frame: i64,
     fps: Rational,
-) -> Result<ThumbData> {
+) -> Result<image::RgbaImage> {
     // Input seek (`-ss` before `-i`) is orders of magnitude faster than output
     // seek and is accurate enough for a bin thumbnail.
     let seconds = frame_to_seconds(frame, fps);
@@ -311,14 +374,11 @@ fn make_thumbnail(
         );
     }
 
-    let img = image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png)
-        .context("cannot decode the thumbnail ffmpeg produced")?
-        .to_rgba8();
-    Ok(ThumbData {
-        width: img.width() as usize,
-        height: img.height() as usize,
-        rgba: img.into_raw(),
-    })
+    Ok(
+        image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png)
+            .context("cannot decode the thumbnail ffmpeg produced")?
+            .to_rgba8(),
+    )
 }
 
 /// Drop the calling thread to the lowest priority the OS offers, so a thumbnail
@@ -377,6 +437,28 @@ fn lower_thread_priority() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filmstrip_tiles_span_the_clip_in_order() {
+        let last = 299;
+        let frames: Vec<i64> = (0..FILMSTRIP_FRAMES)
+            .map(|i| filmstrip_frame(i, 300))
+            .collect();
+        assert_eq!(frames.len(), FILMSTRIP_FRAMES);
+        // Never the very first frame, which is usually black.
+        assert!(frames[0] > 0, "tile 0 sampled frame {}", frames[0]);
+        assert!(frames.windows(2).all(|w| w[0] < w[1]), "{frames:?}");
+        assert!(*frames.last().unwrap() <= last);
+    }
+
+    #[test]
+    fn filmstrip_handles_degenerate_clips() {
+        // A one-frame clip: every tile is frame 0, and nothing panics.
+        for i in 0..FILMSTRIP_FRAMES {
+            assert_eq!(filmstrip_frame(i, 1), 0);
+            assert_eq!(filmstrip_frame(i, 0), 0);
+        }
+    }
 
     #[test]
     fn pool_size_is_bounded() {

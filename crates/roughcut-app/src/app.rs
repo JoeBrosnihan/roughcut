@@ -991,20 +991,26 @@ impl RoughcutApp {
                         StatusKind::Error,
                     ),
                 },
-                JobResult::Thumbnail { clip_id, result } => match result {
-                    Ok(t) => {
+                JobResult::Filmstrip { clip_id, result } => match result {
+                    Ok(strip) => {
                         let image = egui::ColorImage::from_rgba_unmultiplied(
-                            [t.width, t.height],
-                            &t.rgba,
+                            [strip.width, strip.height],
+                            &strip.rgba,
+                        );
+                        log::debug!(
+                            "filmstrip {clip_id}: {}x{} ({} KiB)",
+                            strip.width,
+                            strip.height,
+                            strip.rgba.len() / 1024
                         );
                         let handle = ctx.load_texture(
-                            format!("thumb-{clip_id}"),
+                            format!("strip-{clip_id}"),
                             image,
                             egui::TextureOptions::LINEAR,
                         );
                         self.thumbnails.insert(clip_id, handle);
                     }
-                    Err(e) => log::warn!("thumbnail for {clip_id}: {e:#}"),
+                    Err(e) => log::warn!("filmstrip for {clip_id}: {e:#}"),
                 },
                 JobResult::ProxyStarted { clip_id } => {
                     self.proxy_state.insert(clip_id, ProxyState::Running);
@@ -1101,12 +1107,10 @@ impl RoughcutApp {
         if !self.tools.has_ffmpeg() {
             return;
         }
-        // A frame a little way in: the first frame of a shot is often black.
-        let frame = (clip.duration_frames / 10).clamp(0, clip.last_frame());
-        self.workers.submit(Job::Thumbnail {
+        self.workers.submit(Job::Filmstrip {
             clip_id: id,
             path: clip.path.clone(),
-            frame,
+            duration_frames: clip.duration_frames,
             fps: self.project.fps(),
         });
     }
