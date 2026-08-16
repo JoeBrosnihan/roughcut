@@ -39,7 +39,11 @@
 [CmdletBinding()]
 param(
     [string]$Dest = "$env:LOCALAPPDATA\Programs\Roughcut",
-    [switch]$NoShortcut
+    [switch]$NoShortcut,
+    # Close a running production build instead of refusing. Off by default:
+    # that copy is the one being edited in, and losing it mid-session is worse
+    # than a promotion that waits.
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +60,21 @@ if ($running) {
     if ($answer -notmatch '^[Yy]') { throw "promotion cancelled" }
     $running | Stop-Process -Force
     Start-Sleep -Milliseconds 500
+}
+
+# The production copy cannot be replaced while it is running, and it is the
+# one actually being used for editing. Say so before spending a build on it.
+$inUse = @(Get-Process roughcut -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path.StartsWith($Dest, 'OrdinalIgnoreCase') })
+if ($inUse) {
+    Write-Host "Production is running:" -ForegroundColor Yellow
+    $inUse | ForEach-Object { Write-Host "  pid $($_.Id)  $($_.Path)" }
+    if (-not $Force) {
+        throw "Close it and run this again, or pass -Force to close it automatically. Nothing has been changed."
+    }
+    Write-Host "-Force given; closing it." -ForegroundColor Yellow
+    $inUse | Stop-Process -Force
+    Start-Sleep -Milliseconds 600
 }
 
 Write-Host "Building release..." -ForegroundColor Cyan
