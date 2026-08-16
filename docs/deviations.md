@@ -42,7 +42,7 @@ save-on-demand model loses everything between saves. It is event-driven
 specifically so it does not break §3's idle budget. See
 [design.md](design.md).
 
-**9. `ROUGHCUT_CONFIG_DIR` and `tools/install.ps1` are not in the brief.** They
+**9. `ROUGHCUT_CONFIG_DIR` and `tools/promote.ps1` are not in the brief.** They
 exist so a stable installed copy and an actively changing source tree can
 coexist without sharing settings or an autosave slot. See
 [building.md](building.md).

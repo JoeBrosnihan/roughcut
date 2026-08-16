@@ -1,12 +1,22 @@
 <#
 .SYNOPSIS
-    Stage a stable, self-contained copy of Roughcut you can keep using while
-    the source tree keeps changing.
+    Promote the current build to stable.
 
 .DESCRIPTION
-    Builds release, then copies the binary and libmpv into a directory outside
-    the repository. Nothing there is touched by `cargo build`, `cargo clean`,
-    or a broken commit — it only changes when you run this script again.
+    Roughcut exists in two forms:
+
+      stable  the promoted copy in %LOCALAPPDATA%\Programs\Roughcut, which you
+              actually use for editing, and which only ever changes when this
+              script is run
+      dev     the source tree, run with `cargo run`, which changes constantly
+
+    Promoting builds release and copies the binary and libmpv into the stable
+    location. Nothing there is touched by `cargo build`, `cargo clean`, or a
+    broken commit — it only changes when you run this script again.
+
+    Tag the commit you promote, so `stable` is always recoverable from source:
+
+        git tag -a v0.2.0 -m "..." && .\tools\promote.ps1
 
     The installed copy is self-contained: libmpv sits beside the executable,
     which is the first place Roughcut looks for it.

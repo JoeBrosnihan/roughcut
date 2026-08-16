@@ -41,7 +41,7 @@ the result with no complaints. See
 ```
 cargo run --release -- path\to\clip.mp4     # run it
 cargo test --workspace                      # 89 tests
-.\tools\install.ps1                         # keep a stable copy
+.\tools\promote.ps1                         # keep a stable copy
 ```
 
 Needs `ffprobe` on `PATH` to import and **libmpv 2** to show video; both are

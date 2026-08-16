@@ -78,15 +78,33 @@ link, and none of the following has been exercised even once:
 Expect the first run on a Mac to need fixing. Nothing on that list is
 structural.
 
-## Keeping a stable copy while you iterate
+## stable and dev
 
-`cargo build` overwrites `target/release/roughcut.exe`, so the binary you use
-for real work disappears the moment you touch the code. Install a copy outside
-the repository instead:
+Roughcut exists in two forms, and it is worth being precise about which one is
+meant:
+
+| | **stable** | **dev** |
+| --- | --- | --- |
+| What | The copy you edit with | The source tree |
+| Where | `%LOCALAPPDATA%\Programs\Roughcut` | `target\release\` |
+| Run by | Start Menu, or the exe directly | `cargo run --release` |
+| Changes | Only when you **promote** | Every build |
+| Settings | `%APPDATA%\Roughcut\` | `target\dev-config\` |
+| Identified by | `VERSION.txt`, and a git tag | Whatever is checked out |
+
+**Promoting** is the act of making the current build the stable one:
 
 ```
-.\tools\install.ps1
+git tag -a v0.2.0 -m "what changed"
+.\tools\promote.ps1
 ```
+
+Tag first, so stable is always recoverable from source rather than only
+existing as a binary. Rolling back is then `git checkout v0.1.0` followed by
+another promotion.
+
+`cargo build` overwrites `target/release/roughcut.exe`, which is exactly why
+stable lives outside the repository:
 
 That builds release, puts `roughcut.exe` and `libmpv-2.dll` into
 `%LOCALAPPDATA%\Programs\Roughcut`, writes a `VERSION.txt` recording what and
