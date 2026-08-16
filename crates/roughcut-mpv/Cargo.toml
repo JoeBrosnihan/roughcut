@@ -1,0 +1,12 @@
+[package]
+name = "roughcut-mpv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "libmpv client and OpenGL render API bindings for Roughcut"
+
+[dependencies]
+anyhow.workspace = true
+libloading.workspace = true
+log.workspace = true

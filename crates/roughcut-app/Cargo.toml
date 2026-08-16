@@ -1,0 +1,35 @@
+[package]
+name = "roughcut-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Roughcut — a keyboard-driven assembly editor that exports MLT XML"
+
+[[bin]]
+name = "roughcut"
+path = "src/main.rs"
+
+[dependencies]
+roughcut-core = { path = "../roughcut-core" }
+roughcut-mpv = { path = "../roughcut-mpv" }
+
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_glow.workspace = true
+env_logger.workspace = true
+image.workspace = true
+log.workspace = true
+num_cpus.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Only for dropping background worker threads to the lowest OS priority.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

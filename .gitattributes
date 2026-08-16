@@ -1,0 +1,9 @@
+# Normalise line endings in the repository; working copies get whatever the
+# platform prefers. Keeps diffs clean across Windows and macOS.
+* text=auto
+
+*.rs    text
+*.toml  text
+*.md    text
+*.mlt   text
+*.ps1   text eol=crlf

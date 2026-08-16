@@ -1,0 +1,10 @@
+# Anything launched through cargo — `cargo run`, `cargo test` — keeps its
+# settings and autosave under target/, so iterating on the code can never
+# disturb the settings, or clobber the recovery snapshot, of the stable copy
+# installed by tools/install.ps1.
+#
+# `relative = true` resolves against this file's parent, i.e. the workspace
+# root. An explicit ROUGHCUT_CONFIG_DIR in the environment still wins, because
+# `force` defaults to false.
+[env]
+ROUGHCUT_CONFIG_DIR = { value = "target/dev-config", relative = true }

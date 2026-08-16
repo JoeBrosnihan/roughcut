@@ -1,0 +1,67 @@
+# Roughcut keyboard map
+
+Generated from `crates/roughcut-app/src/actions.rs` — run
+`cargo test -p roughcut-app keys_md_is_current` to check it is up to date.
+
+Scope is the region a binding applies to. `Source` and `Timeline` bindings
+act on whichever region currently has focus; press `Tab` to switch.
+
+## Transport
+
+| Key | Action | Scope |
+| --- | --- | --- |
+| `Space` | Play / pause | Any |
+| `L` | Play forward — repeat to cycle 1x, 2x, 4x, 8x | Any |
+| `J` | Play reverse — repeat to cycle 1x, 2x, 4x, 8x | Any |
+| `K` | Pause | Any |
+| `Right / Left` | Step one frame forward / back | Any |
+| `Shift+Right / Shift+Left` | Step one second forward / back | Any |
+| `Home / End` | Go to start / end | Any |
+| `Up / Down` | Jump to previous / next cut point | Timeline |
+
+## Marking
+
+| Key | Action | Scope |
+| --- | --- | --- |
+| `I` | Mark in at the playhead | Source |
+| `O` | Mark out at the playhead | Source |
+| `Shift+I` | Clear in | Source |
+| `Shift+O` | Clear out | Source |
+| `Shift+X` | Clear both | Source |
+
+## Assembly
+
+| Key | Action | Scope |
+| --- | --- | --- |
+| `A  or  Enter` | Append the marked source range to the timeline | Any |
+| `V` | Insert the marked range at the playhead, rippling | Any |
+
+## Timeline editing
+
+| Key | Action | Scope |
+| --- | --- | --- |
+| `X` | Select the clip under the playhead | Timeline |
+| `Delete / Backspace` | Ripple delete the selected clip | Timeline |
+| `[` | Trim the head of the selected clip to the playhead | Timeline |
+| `]` | Trim the tail of the selected clip to the playhead | Timeline |
+| `Ctrl+Left / Ctrl+Right` | Move the selected clip one position earlier / later | Timeline |
+
+## File
+
+| Key | Action | Scope |
+| --- | --- | --- |
+| `Ctrl+O` | Open project | Any |
+| `Ctrl+S` | Save project | Any |
+| `Ctrl+Shift+S` | Save project as | Any |
+| `Ctrl+I` | Import media | Any |
+| `Ctrl+E` | Export MLT XML | Any |
+| `Ctrl+Z / Ctrl+Shift+Z` | Undo / redo | Any |
+
+## View
+
+| Key | Action | Scope |
+| --- | --- | --- |
+| `Tab` | Switch focus between source and timeline | Any |
+| `- / =` | Zoom the timeline out / in | Timeline |
+| `0` | Fit the timeline to the window | Timeline |
+| `?` | Show this help | Any |
