@@ -35,7 +35,7 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                     0.5
                 };
             }
-            wheel_zoom(app, ui, rect);
+            wheel_input(app, ui, rect, total, usable);
             let px_per_frame = app.zoom;
 
             let painter = ui.painter_at(rect);
@@ -109,41 +109,55 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
         });
 }
 
-/// Ctrl+wheel zooms the timeline, keeping the frame under the pointer where it
-/// is. Zooming about the left edge is disorienting: the thing you are looking
-/// at slides away from you.
+/// The wheel over the timeline: Ctrl to zoom, otherwise to scroll sideways.
 ///
-/// Plain wheel is left to the scroll area, so scrolling and zooming stay
-/// distinct gestures.
-fn wheel_zoom(app: &mut RoughcutApp, ui: &egui::Ui, rect: Rect) {
-    let (scroll, ctrl, pointer) = ui.input(|i| {
+/// Both are driven explicitly rather than left to the scroll area. The canvas
+/// senses drags so clips can be reordered, which takes drag-to-pan away, and
+/// the timeline only ever scrolls on one axis — so a plain wheel meaning
+/// "sideways" is the useful mapping rather than a surprising one.
+fn wheel_input(app: &mut RoughcutApp, ui: &egui::Ui, rect: Rect, total: i64, usable: f32) {
+    let (delta, ctrl, pointer) = ui.input(|i| {
+        let d = i.raw_scroll_delta;
         (
-            i.raw_scroll_delta.y,
+            // A horizontal wheel or trackpad gesture wins if there is one.
+            if d.x != 0.0 { d.x } else { d.y },
             i.modifiers.command || i.modifiers.ctrl,
             i.pointer.latest_pos(),
         )
     });
-    if !ctrl || scroll == 0.0 {
+    if delta == 0.0 {
         return;
     }
     let Some(pointer) = pointer.filter(|p| rect.contains(*p)) else {
         return;
     };
 
-    // Where the canvas starts on screen, given how far it is scrolled.
-    let canvas_left = rect.left() - app.timeline_offset;
-    let frame_under_pointer = (pointer.x - canvas_left) / app.zoom.max(1e-6);
+    if ctrl {
+        // Zoom about the frame under the pointer. Zooming about the left edge
+        // is disorienting: the thing you are looking at slides away from you.
+        let canvas_left = rect.left() - app.timeline_offset;
+        let frame_under_pointer = (pointer.x - canvas_left) / app.zoom.max(1e-6);
 
-    let factor = if scroll > 0.0 { 1.25 } else { 1.0 / 1.25 };
-    let zoomed = (app.zoom * factor).clamp(0.0005, 40.0);
-    if (zoomed - app.zoom).abs() < f32::EPSILON {
+        let factor = if delta > 0.0 { 1.25 } else { 1.0 / 1.25 };
+        let zoomed = (app.zoom * factor).clamp(0.0005, 40.0);
+        if (zoomed - app.zoom).abs() < f32::EPSILON {
+            return;
+        }
+        app.zoom = zoomed;
+        app.zoom_fit = false;
+        app.timeline_scroll_to =
+            Some(frame_under_pointer * app.zoom - (pointer.x - rect.left()));
         return;
     }
-    app.zoom = zoomed;
-    app.zoom_fit = false;
 
-    // Put that same frame back under the pointer.
-    app.timeline_scroll_to = Some(frame_under_pointer * app.zoom - (pointer.x - rect.left()));
+    // Scroll sideways, bounded by how much timeline there is to see.
+    let content = (total as f32 * app.zoom).max(usable);
+    let max_offset = (content - usable).max(0.0);
+    if max_offset <= 0.0 {
+        return;
+    }
+    let target = (app.timeline_offset - delta).clamp(0.0, max_offset);
+    app.timeline_scroll_to = Some(target);
 }
 
 /// Drag a clip along the timeline to reorder it.
@@ -318,7 +332,7 @@ fn paint_block_filmstrip(
     // Darken slightly so the labels drawn on top stay readable.
     clipped.rect_filled(
         block,
-        CornerRadius::ZERO,
+        CornerRadius::same(theme::CLIP_RADIUS),
         egui::Color32::from_black_alpha(90),
     );
 }
@@ -374,9 +388,10 @@ fn draw(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, px_per_frame: f32) {
         }
 
         let selected = app.selected_item == Some(i);
+        let radius = CornerRadius::same(theme::CLIP_RADIUS);
         painter.rect_filled(
             block,
-            CornerRadius::ZERO,
+            radius,
             if selected {
                 theme::CLIP_SELECTED
             } else {
@@ -387,7 +402,7 @@ fn draw(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, px_per_frame: f32) {
 
         painter.rect_stroke(
             block,
-            CornerRadius::ZERO,
+            radius,
             Stroke::new(
                 if selected { 2.0 } else { 1.0 },
                 if selected { theme::ACCENT } else { theme::LINE },

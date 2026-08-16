@@ -90,6 +90,9 @@ pub struct RoughcutApp {
     pub timeline_scroll_to: Option<f32>,
     /// Timeline item being dragged to a new position, if any.
     pub dragging_item: Option<usize>,
+    /// Set when the playhead crosses a cut, so the next media sync forces mpv
+    /// to the new position instead of letting it keep playing where it was.
+    force_media_jump: bool,
     /// A shift-drag in progress on the source scrub bar, as (anchor, current)
     /// source frames. Marks are only committed on release, so the drag costs
     /// one undo entry rather than one per pixel.
@@ -163,6 +166,7 @@ impl RoughcutApp {
             timeline_scroll_to: None,
             dragging_item: None,
             mark_drag: None,
+            force_media_jump: false,
             fullscreen: false,
             fullscreen_pending: false,
             thumbnails: HashMap::new(),
@@ -398,7 +402,8 @@ impl RoughcutApp {
                     Focus::Source => {
                         let last = self.position_max();
                         self.set_position(reported);
-                        if reported >= last {
+                        // The end of a bin clip really is the end.
+                        if reported >= last || self.monitor.eof {
                             self.monitor.pause();
                         }
                     }
@@ -430,13 +435,27 @@ impl RoughcutApp {
         // timeline playhead and clamps it.
         let item = self.project.timeline[idx];
         let start = timeline::item_start(&self.project.timeline, idx);
-        if reported_source_frame > item.out_frame {
-            // Roll onto the next item, or stop at the end of the sequence.
+
+        // This item is finished either when mpv plays past its out point, or
+        // when mpv runs out of file — which happens whenever the out point is
+        // the last frame of its source, i.e. for any whole clip.
+        let done = reported_source_frame > item.out_frame || self.monitor.eof;
+        if done {
             let next_start = start + item.len();
             if next_start >= self.timeline_len() {
                 self.monitor.pause();
+                self.set_position(timeline::last_frame(&self.project.timeline));
+            } else {
+                log::debug!(
+                    "timeline: item {idx} done at source frame {reported_source_frame}                      (out {}, eof {}) - rolling to frame {next_start}",
+                    item.out_frame,
+                    self.monitor.eof
+                );
+                self.set_position(next_start);
+                // mpv is either at the end of a file or midway through the
+                // wrong part of one; either way it must be told where to go.
+                self.force_media_jump = true;
             }
-            self.set_position(next_start);
             return;
         }
         let offset = (reported_source_frame - item.in_frame).max(0);
@@ -1441,7 +1460,11 @@ impl eframe::App for RoughcutApp {
                             video.ensure_context(player, self.repaint.clone());
                         }
                     }
-                    self.monitor.show(&path, position);
+                    if std::mem::take(&mut self.force_media_jump) {
+                        self.monitor.jump(&path, position);
+                    } else {
+                        self.monitor.show(&path, position);
+                    }
                 }
             }
             None => self.monitor.clear(),

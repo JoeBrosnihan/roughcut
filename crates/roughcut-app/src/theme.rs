@@ -22,6 +22,14 @@ pub const VIDEO_LETTERBOX: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0b);
 /// Width of the accent border marking the focused region.
 pub const FOCUS_BORDER: f32 = 2.0;
 
+/// The one place the flat, square rule bends: timeline clips.
+///
+/// Panels and chrome stay square — rounding them would be decoration. Clip
+/// blocks are different: they abut each other with no gap, so a shared square
+/// edge reads as one long block. A small radius makes each clip legibly its
+/// own object without adding any chrome.
+pub const CLIP_RADIUS: u8 = 4;
+
 pub fn apply(ctx: &egui::Context) {
     let mut visuals = Visuals::dark();
     visuals.override_text_color = Some(TEXT);

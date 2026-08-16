@@ -70,6 +70,10 @@ pub struct Monitor {
     pub reported_frame: Option<i64>,
     pub transport: Transport,
     pub hwdec: Option<String>,
+    /// mpv has reached the end of the loaded file. Reported, not acted on:
+    /// only the application knows whether that means "stop" or "roll onto the
+    /// next clip on the timeline".
+    pub eof: bool,
     /// Timer for reverse shuttle.
     last_reverse_tick: Option<Instant>,
     /// The outstanding position change, if any. Used both to know when mpv
@@ -99,6 +103,7 @@ impl Monitor {
             reported_frame: None,
             transport: Transport::Paused,
             hwdec: None,
+            eof: false,
             last_reverse_tick: None,
             pending: None,
             corrected_for: None,
@@ -201,6 +206,7 @@ impl Monitor {
         for ev in events {
             match ev {
                 Event::FileLoaded => {
+                    self.eof = false;
                     self.hwdec = self.player.as_ref().and_then(|p| p.hwdec_active());
                     match &self.hwdec {
                         Some(h) => log::info!("hardware decode active: {h}"),
@@ -236,14 +242,10 @@ impl Monitor {
                         self.finish_pending(at, frame, "seek");
                     }
                 }
-                Event::EofReached(true) => {
-                    if matches!(self.transport, Transport::Forward(_)) {
-                        self.transport = Transport::Paused;
-                        if let Some(player) = &self.player {
-                            let _ = player.set_paused(true);
-                        }
-                    }
-                }
+                // Deliberately does not pause. Pausing here is what stopped
+                // timeline playback dead at the end of any clip whose out
+                // point was the last frame of its source file.
+                Event::EofReached(reached) => self.eof = reached,
                 Event::HwdecCurrent(h) => {
                     self.hwdec = h.filter(|s| s != "no" && !s.is_empty());
                 }
@@ -264,6 +266,24 @@ impl Monitor {
     /// Make mpv show `frame` of `path`. Called every update; it only issues a
     /// command when something actually needs to change.
     pub fn show(&mut self, path: &Path, frame: i64) {
+        self.show_impl(path, frame, false);
+    }
+
+    /// Move even while playing forward.
+    ///
+    /// `show` leaves mpv alone during playback, because seeking every frame
+    /// would fight it. That is wrong at exactly one moment: when the
+    /// application crosses a cut and mpv's own progress is no longer the right
+    /// answer — especially when the next clip comes from the same file, where
+    /// there is no load to force the issue.
+    pub fn jump(&mut self, path: &Path, frame: i64) {
+        self.eof = false;
+        self.requested_frame = None;
+        self.corrected_for = None;
+        self.show_impl(path, frame, true);
+    }
+
+    fn show_impl(&mut self, path: &Path, frame: i64, force: bool) {
         let Some(player) = &self.player else {
             return;
         };
@@ -283,7 +303,7 @@ impl Monitor {
 
         // While playing forward, mpv owns the position; seeking every frame
         // would fight it and stutter.
-        if matches!(self.transport, Transport::Forward(_)) {
+        if !force && matches!(self.transport, Transport::Forward(_)) {
             return;
         }
         if self.pending_seek.is_some() {
