@@ -64,6 +64,7 @@ append to the timeline.
 | [docs/design.md](docs/design.md) | Crate layout, video integration, autosave, undo |
 | [docs/verification.md](docs/verification.md) | Measured performance, the test suite, what still needs a human |
 | [docs/deviations.md](docs/deviations.md) | Every departure from the original brief, and why |
+| [docs/licensing.md](docs/licensing.md) | Why MIT is safe, and the one thing that would change it |
 
 ## Layout
 
@@ -75,6 +76,13 @@ crates/roughcut-app    egui application
 
 `roughcut-core` knows nothing about egui, mpv or threads, so the parts that
 must be correct are testable without a window or a GPU.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE). No dependency is copyleft-only, and the external
+tools are separate processes. The one caveat is that libmpv should be assumed
+GPL, so do not ship it alongside a binary without reading
+[docs/licensing.md](docs/licensing.md) first.
 
 ## Conventions
 
