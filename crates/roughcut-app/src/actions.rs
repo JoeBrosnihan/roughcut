@@ -50,6 +50,7 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomFit,
+    ToggleFullscreen,
     ToggleHelp,
 }
 
@@ -84,7 +85,8 @@ pub const KEY_MAP: &[Section] = &[
             Binding { keys: "Right / Left", description: "Step one frame forward / back", scope: Scope::Global },
             Binding { keys: "Shift+Right / Shift+Left", description: "Step one second forward / back", scope: Scope::Global },
             Binding { keys: "Home / End", description: "Go to start / end", scope: Scope::Global },
-            Binding { keys: "Up / Down", description: "Jump to previous / next cut point", scope: Scope::Timeline },
+            Binding { keys: "Up / Down", description: "Jump to previous / next edit point", scope: Scope::Timeline },
+            Binding { keys: "Alt+Left / Alt+Right", description: "Jump to previous / next edit point — Shotcut's binding", scope: Scope::Timeline },
         ],
     },
     Section {
@@ -131,6 +133,8 @@ pub const KEY_MAP: &[Section] = &[
             Binding { keys: "Tab", description: "Switch focus between source and timeline", scope: Scope::Global },
             Binding { keys: "- / =", description: "Zoom the timeline out / in", scope: Scope::Timeline },
             Binding { keys: "0", description: "Fit the timeline to the window", scope: Scope::Timeline },
+            Binding { keys: "Ctrl+Wheel", description: "Zoom the timeline about the pointer", scope: Scope::Timeline },
+            Binding { keys: "F11", description: "Toggle fullscreen", scope: Scope::Global },
             Binding { keys: "?", description: "Show this help", scope: Scope::Global },
         ],
     },

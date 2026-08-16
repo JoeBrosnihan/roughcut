@@ -70,9 +70,10 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     let (canvas, response) = ui.allocate_exact_size(
                         egui::vec2(content_width, TIMELINE_HEIGHT - 4.0),
-                        Sense::click(),
+                        Sense::click_and_drag(),
                     );
                     draw(app, ui, canvas, px_per_frame);
+                    handle_reorder_drag(app, ui, &response, canvas, px_per_frame);
                     handle_click(app, &response, canvas, px_per_frame);
                     canvas
                 });
@@ -143,6 +144,80 @@ fn wheel_zoom(app: &mut RoughcutApp, ui: &egui::Ui, rect: Rect) {
 
     // Put that same frame back under the pointer.
     app.timeline_scroll_to = Some(frame_under_pointer * app.zoom - (pointer.x - rect.left()));
+}
+
+/// Drag a clip along the timeline to reorder it.
+///
+/// Handled on the canvas rather than with a widget per block: one interactive
+/// region cannot fight with itself over which of two overlapping widgets got
+/// the click, and clicking to seek keeps working unchanged.
+fn handle_reorder_drag(
+    app: &mut RoughcutApp,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    canvas: Rect,
+    px_per_frame: f32,
+) {
+    let index_at = |app: &RoughcutApp, x: f32| -> Option<usize> {
+        let frame = frame_at_x(x, canvas, px_per_frame, app);
+        tl::item_at(&app.project.timeline, frame).map(|(i, _)| i)
+    };
+
+    if response.drag_started() {
+        app.dragging_item = response
+            .interact_pointer_pos()
+            .and_then(|p| index_at(app, p.x));
+    }
+
+    let Some(from) = app.dragging_item else {
+        return;
+    };
+
+    if response.dragged() {
+        // Show where it would land: the moved block ghosted, and a bar on the
+        // boundary it would come to rest against.
+        let painter = ui.painter_at(canvas);
+        let start = tl::item_start(&app.project.timeline, from);
+        if let Some(item) = app.project.timeline.get(from) {
+            let ghost = Rect::from_min_max(
+                egui::pos2(
+                    canvas.left() + start as f32 * px_per_frame,
+                    canvas.top() + BLOCK_TOP,
+                ),
+                egui::pos2(
+                    canvas.left() + (start + item.len()) as f32 * px_per_frame,
+                    canvas.top() + BLOCK_TOP + BLOCK_HEIGHT,
+                ),
+            );
+            painter.rect_filled(
+                ghost,
+                CornerRadius::ZERO,
+                theme::ACCENT.linear_multiply(0.25),
+            );
+        }
+        if let Some(to) = response.interact_pointer_pos().and_then(|p| index_at(app, p.x)) {
+            let boundary = if to > from { to + 1 } else { to };
+            let x = canvas.left()
+                + tl::item_start(&app.project.timeline, boundary) as f32 * px_per_frame;
+            painter.line_segment(
+                [
+                    egui::pos2(x, canvas.top() + RULER_HEIGHT),
+                    egui::pos2(x, canvas.top() + BLOCK_TOP + BLOCK_HEIGHT),
+                ],
+                Stroke::new(2.0, theme::MARK_IN),
+            );
+        }
+    }
+
+    if response.drag_stopped() {
+        let to = response
+            .interact_pointer_pos()
+            .and_then(|p| index_at(app, p.x));
+        app.dragging_item = None;
+        if let Some(to) = to {
+            app.reorder_item(from, to);
+        }
+    }
 }
 
 /// The bin clip currently being dragged, if any.

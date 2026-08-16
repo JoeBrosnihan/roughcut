@@ -177,21 +177,27 @@ pub fn trim_tail(project: &mut Project, index: usize, playhead: i64) -> bool {
     true
 }
 
+/// Move the item at `from` so it sits at index `to`, sliding the rest along.
+/// Returns false when either index is out of range or nothing would change.
+pub fn reorder(project: &mut Project, from: usize, to: usize) -> bool {
+    let len = project.timeline.len();
+    if from >= len || to >= len || from == to {
+        return false;
+    }
+    let item = project.timeline.remove(from);
+    project.timeline.insert(to, item);
+    true
+}
+
 /// Move an item one position earlier (`delta == -1`) or later (`delta == 1`).
 /// Returns the item's new index.
 pub fn move_item(project: &mut Project, index: usize, delta: isize) -> Option<usize> {
-    let len = project.timeline.len();
-    if index >= len {
-        return None;
-    }
     let target = index as isize + delta;
-    if target < 0 || target as usize >= len {
+    if target < 0 {
         return None;
     }
     let target = target as usize;
-    let item = project.timeline.remove(index);
-    project.timeline.insert(target, item);
-    Some(target)
+    reorder(project, index, target).then_some(target)
 }
 
 /// Clamp a source range to the clip's real extent and reject empty ranges.
@@ -393,6 +399,35 @@ mod tests {
         assert!(!trim_tail(&mut p, 0, 0), "trimming away every frame is refused");
         assert!(!trim_head(&mut p, 0, 100), "playhead past the clip is refused");
         assert_eq!(p.timeline[0].len(), 100);
+    }
+
+    #[test]
+    fn reorder_moves_an_item_anywhere() {
+        let (mut p, _) = project_with(&[(0, 9), (0, 19), (0, 29)]);
+        // Drag the last one to the front.
+        assert!(reorder(&mut p, 2, 0));
+        assert_eq!(
+            p.timeline.iter().map(|i| i.len()).collect::<Vec<_>>(),
+            vec![30, 10, 20]
+        );
+        // Total length never changes when only the order does.
+        assert_eq!(total_frames(&p.timeline), 60);
+
+        // And back again.
+        assert!(reorder(&mut p, 0, 2));
+        assert_eq!(
+            p.timeline.iter().map(|i| i.len()).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn reorder_rejects_nonsense() {
+        let (mut p, _) = project_with(&[(0, 9), (0, 19)]);
+        assert!(!reorder(&mut p, 0, 0), "moving onto itself changes nothing");
+        assert!(!reorder(&mut p, 5, 0));
+        assert!(!reorder(&mut p, 0, 5));
+        assert_eq!(p.timeline.len(), 2);
     }
 
     #[test]

@@ -220,9 +220,7 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
     );
 
     // The one position readout in the application: where the playhead is, and
-    // how long the thing under it runs for. Everything is frames underneath,
-    // so the frame number sits next to the timecode rather than in a separate
-    // bar somewhere else.
+    // how long the thing under it runs for.
     let fps = app.fps();
     painter.text(
         egui::pos2(rect.left() + 10.0, rect.bottom() - 4.0),
@@ -230,13 +228,6 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
         format_timecode(position, fps),
         egui::FontId::monospace(11.0),
         theme::TEXT,
-    );
-    painter.text(
-        egui::pos2(rect.left() + 86.0, rect.bottom() - 4.0),
-        egui::Align2::LEFT_BOTTOM,
-        format!("f{position}"),
-        egui::FontId::monospace(10.0),
-        theme::TEXT_DIM,
     );
     painter.text(
         egui::pos2(rect.right() - 10.0, rect.bottom() - 4.0),

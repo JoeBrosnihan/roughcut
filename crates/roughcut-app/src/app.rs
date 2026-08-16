@@ -88,6 +88,13 @@ pub struct RoughcutApp {
     /// anchored on the frame under the pointer instead of on the left edge.
     pub timeline_offset: f32,
     pub timeline_scroll_to: Option<f32>,
+    /// Timeline item being dragged to a new position, if any.
+    pub dragging_item: Option<usize>,
+    /// Mirrors the viewport's fullscreen state, so F11 toggles rather than
+    /// guessing. `fullscreen_pending` defers the actual viewport command to
+    /// `update`, which is the only place with a `Context` to send it on.
+    pub fullscreen: bool,
+    fullscreen_pending: bool,
 
     pub thumbnails: HashMap<ClipId, egui::TextureHandle>,
     thumb_requested: HashSet<ClipId>,
@@ -150,6 +157,9 @@ impl RoughcutApp {
             zoom_fit: true,
             timeline_offset: 0.0,
             timeline_scroll_to: None,
+            dragging_item: None,
+            fullscreen: false,
+            fullscreen_pending: false,
             thumbnails: HashMap::new(),
             thumb_requested: HashSet::new(),
             proxy_state: HashMap::new(),
@@ -556,6 +566,7 @@ impl RoughcutApp {
                 self.zoom = (self.zoom / 1.5).max(0.002);
             }
             Action::ZoomFit => self.zoom_fit = true,
+            Action::ToggleFullscreen => self.fullscreen_pending = true,
             Action::ToggleHelp => self.show_help = !self.show_help,
         }
     }
@@ -761,6 +772,17 @@ impl RoughcutApp {
         }
     }
 
+    /// Drop a dragged timeline item at a new index.
+    pub fn reorder_item(&mut self, from: usize, to: usize) {
+        if self.edit(|p| timeline::reorder(p, from, to)) {
+            self.selected_item = Some(to);
+            let at = timeline::item_start(&self.project.timeline, to);
+            self.focus = Focus::Timeline;
+            self.set_position(at);
+            self.set_status("clip moved", StatusKind::Info);
+        }
+    }
+
     fn move_selected(&mut self, delta: isize) {
         let Some(idx) = self.target_item() else {
             self.set_status("no clip under the playhead", StatusKind::Warn);
@@ -785,6 +807,53 @@ impl RoughcutApp {
         self.autosave_pending = true;
         self.monitor.set_fps(self.project.fps());
         self.clamp_selection();
+    }
+
+    /// Keep the window's position and size up to date in settings, so the next
+    /// launch opens where this one left off. Reading viewport info is free and
+    /// requests no repaint; the values are written to disk once, on exit.
+    fn remember_window_geometry(&mut self, ctx: &egui::Context) {
+        let (rect, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.outer_rect,
+                v.maximized.unwrap_or(false),
+                v.fullscreen.unwrap_or(false),
+            )
+        });
+        self.fullscreen = fullscreen;
+
+        let mut geometry = self.settings.window.unwrap_or(crate::settings::WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 900.0,
+            maximized: false,
+        });
+        geometry.maximized = maximized;
+        // Only record the restored geometry, never the maximised or fullscreen
+        // rect — otherwise un-maximising would drop the window at full size.
+        if !maximized && !fullscreen {
+            if let Some(r) = rect {
+                geometry.x = r.min.x;
+                geometry.y = r.min.y;
+                geometry.width = r.width();
+                geometry.height = r.height();
+            }
+        }
+        if geometry.is_plausible() {
+            self.settings.window = Some(geometry);
+        }
+    }
+
+    /// Send a deferred fullscreen toggle. Viewport commands schedule another
+    /// pass, so this only ever runs when F11 was actually pressed.
+    fn apply_fullscreen(&mut self, ctx: &egui::Context) {
+        if !std::mem::take(&mut self.fullscreen_pending) {
+            return;
+        }
+        self.fullscreen = !self.fullscreen;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
     }
 
     /// True while a modal is up. Key dispatch pauses so a stray `A` cannot
@@ -1234,6 +1303,7 @@ impl eframe::App for RoughcutApp {
         // stop responding to keys. Nothing here needs widget focus, so it is
         // surrendered every pass.
         ctx.memory_mut(|m| m.stop_text_input());
+        self.remember_window_geometry(ctx);
 
         // Background work stops while the window is not focused (§3).
         let focused = ctx.input(|i| i.focused);
@@ -1279,6 +1349,8 @@ impl eframe::App for RoughcutApp {
             }
             None => self.monitor.clear(),
         }
+
+        self.apply_fullscreen(ctx);
 
         // One write per pass at most, and only when something actually
         // changed. Passes happen on input, so this costs nothing at idle.

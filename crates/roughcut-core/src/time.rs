@@ -146,59 +146,30 @@ pub fn inclusive_len(in_frame: i64, out_frame: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Timecode — display format only, produced at the last moment and parsed
-// immediately on entry. Never stored, never used for arithmetic.
+// Timecode — display format only, produced at the last moment before text is
+// rendered. Never stored, never used for arithmetic.
 // ---------------------------------------------------------------------------
 
-/// `HH:MM:SS:FF`, non-drop-frame. For NTSC rates the frame field counts to
-/// `nominal_fps - 1`, which is what every NVE shows for a non-drop timeline.
+/// Clock time as `MM:SS`, or `HH:MM:SS` once there are hours.
+///
+/// Deliberately *not* SMPTE `HH:MM:SS:FF`. The hours group is zero for
+/// essentially everything edited here, and a frames group is a second field of
+/// noise when all you want is how long something runs. Positions inside the
+/// application remain `i64` frame counts regardless of how they are spelled
+/// here — that is what keeps the export landing where you marked.
+///
+/// Truncates rather than rounds, so a displayed second has actually elapsed.
 pub fn format_timecode(frame: i64, fps: Rational) -> String {
-    let neg = frame < 0;
-    let f = frame.abs();
-    let per_sec = fps.nominal_fps();
-    let frames = f % per_sec;
-    let total_secs = f / per_sec;
+    let sign = if frame < 0 { "-" } else { "" };
+    let total_secs = frame.abs() / fps.nominal_fps();
     let secs = total_secs % 60;
     let mins = (total_secs / 60) % 60;
     let hours = total_secs / 3600;
-    format!(
-        "{}{hours:02}:{mins:02}:{secs:02}:{frames:02}",
-        if neg { "-" } else { "" }
-    )
-}
-
-/// Parse `HH:MM:SS:FF`, `MM:SS:FF`, `SS:FF` or a bare frame number.
-pub fn parse_timecode(text: &str, fps: Rational) -> Option<i64> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
+    if hours > 0 {
+        format!("{sign}{hours}:{mins:02}:{secs:02}")
+    } else {
+        format!("{sign}{mins:02}:{secs:02}")
     }
-    let (neg, body) = match text.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, text),
-    };
-    if !body.contains(':') {
-        let n: i64 = body.parse().ok()?;
-        return Some(if neg { -n } else { n });
-    }
-    let per_sec = fps.nominal_fps();
-    let mut parts: Vec<i64> = Vec::with_capacity(4);
-    for p in body.split(':') {
-        parts.push(p.trim().parse().ok()?);
-    }
-    // Right-aligned: the last field is always frames.
-    let mut total = 0i64;
-    for (i, v) in parts.iter().rev().enumerate() {
-        let m = match i {
-            0 => 1,
-            1 => per_sec,
-            2 => per_sec * 60,
-            3 => per_sec * 3600,
-            _ => return None,
-        };
-        total += v * m;
-    }
-    Some(if neg { -total } else { total })
 }
 
 /// MLT's "clock" time format, `HH:MM:SS.mmm`. Emitted only if a target refuses
@@ -291,23 +262,31 @@ mod tests {
     }
 
     #[test]
-    fn timecode_formats_non_drop() {
-        assert_eq!(format_timecode(0, NTSC30), "00:00:00:00");
-        assert_eq!(format_timecode(29, NTSC30), "00:00:00:29");
-        assert_eq!(format_timecode(30, NTSC30), "00:00:01:00");
-        assert_eq!(format_timecode(1800, NTSC30), "00:01:00:00");
-        assert_eq!(format_timecode(100, P25), "00:00:04:00");
+    fn timecode_is_minutes_and_seconds() {
+        assert_eq!(format_timecode(0, NTSC30), "00:00");
+        assert_eq!(format_timecode(30, NTSC30), "00:01");
+        assert_eq!(format_timecode(1800, NTSC30), "01:00");
+        assert_eq!(format_timecode(100, P25), "00:04");
+        assert_eq!(format_timecode(-30, NTSC30), "-00:01");
+    }
+
+    /// Frames within a second do not show, and do not round the second up:
+    /// a displayed second has actually elapsed.
+    #[test]
+    fn timecode_truncates_within_a_second() {
+        for f in 0..30 {
+            assert_eq!(format_timecode(f, NTSC30), "00:00", "frame {f}");
+        }
+        assert_eq!(format_timecode(59, NTSC30), "00:01");
+        assert_eq!(format_timecode(60, NTSC30), "00:02");
     }
 
     #[test]
-    fn timecode_parses_back() {
-        for f in [0i64, 1, 29, 30, 1800, 107891] {
-            let tc = format_timecode(f, NTSC30);
-            assert_eq!(parse_timecode(&tc, NTSC30), Some(f), "tc {tc}");
-        }
-        assert_eq!(parse_timecode("199", NTSC30), Some(199));
-        assert_eq!(parse_timecode("1:00", P25), Some(25));
-        assert_eq!(parse_timecode("garbage", P25), None);
+    fn timecode_shows_hours_only_when_there_are_some() {
+        // 30 nominal fps, so an hour is 108000 frames.
+        assert_eq!(format_timecode(107_999, NTSC30), "59:59");
+        assert_eq!(format_timecode(108_000, NTSC30), "1:00:00");
+        assert_eq!(format_timecode(108_030, NTSC30), "1:00:01");
     }
 
     #[test]

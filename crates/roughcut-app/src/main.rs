@@ -36,12 +36,25 @@ fn main() -> eframe::Result<()> {
     }
     builder.init();
 
+    // Reopen where you left off. Without this the window is forced to a fixed
+    // size on every launch, which means maximising it again every time.
+    let saved = settings::Settings::load().window.filter(|w| w.is_plausible());
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Roughcut")
+        .with_min_inner_size([960.0, 640.0])
+        .with_drag_and_drop(true);
+    match saved {
+        Some(w) => {
+            viewport = viewport
+                .with_inner_size([w.width, w.height])
+                .with_position([w.x, w.y])
+                .with_maximized(w.maximized);
+        }
+        None => viewport = viewport.with_inner_size([1440.0, 900.0]),
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Roughcut")
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([960.0, 640.0])
-            .with_drag_and_drop(true),
+        viewport,
         // §4 binds the UI to the glow (OpenGL) backend, which is also what
         // mpv's render API integration needs.
         renderer: eframe::Renderer::Glow,

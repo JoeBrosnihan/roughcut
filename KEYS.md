@@ -17,7 +17,8 @@ act on whichever region currently has focus; press `Tab` to switch.
 | `Right / Left` | Step one frame forward / back | Any |
 | `Shift+Right / Shift+Left` | Step one second forward / back | Any |
 | `Home / End` | Go to start / end | Any |
-| `Up / Down` | Jump to previous / next cut point | Timeline |
+| `Up / Down` | Jump to previous / next edit point | Timeline |
+| `Alt+Left / Alt+Right` | Jump to previous / next edit point — Shotcut's binding | Timeline |
 
 ## Marking
 
@@ -64,4 +65,6 @@ act on whichever region currently has focus; press `Tab` to switch.
 | `Tab` | Switch focus between source and timeline | Any |
 | `- / =` | Zoom the timeline out / in | Timeline |
 | `0` | Fit the timeline to the window | Timeline |
+| `Ctrl+Wheel` | Zoom the timeline about the pointer | Timeline |
+| `F11` | Toggle fullscreen | Any |
 | `?` | Show this help | Any |

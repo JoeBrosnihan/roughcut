@@ -57,6 +57,17 @@ fn map_key(key: Key, m: Modifiers) -> Option<Action> {
         };
     }
 
+    // Shotcut moves between edit points with Alt+Left/Right. The brief put the
+    // same function on Up/Down; both are kept, so muscle memory from either
+    // tool works.
+    if m.alt {
+        return match key {
+            Key::ArrowLeft => Some(Action::PrevCut),
+            Key::ArrowRight => Some(Action::NextCut),
+            _ => None,
+        };
+    }
+
     match key {
         // Transport
         Key::Space => Some(Action::TogglePlay),
@@ -95,6 +106,7 @@ fn map_key(key: Key, m: Modifiers) -> Option<Action> {
         Key::Minus => Some(Action::ZoomOut),
         Key::Equals | Key::Plus => Some(Action::ZoomIn),
         Key::Num0 => Some(Action::ZoomFit),
+        Key::F11 => Some(Action::ToggleFullscreen),
         Key::Questionmark => Some(Action::ToggleHelp),
         Key::Slash if shift => Some(Action::ToggleHelp),
         Key::Escape => Some(Action::ToggleHelp),
@@ -158,6 +170,13 @@ mod tests {
         assert_eq!(map_key(Key::X, plain()), Some(Action::RippleDelete));
     }
 
+    fn alt() -> Modifiers {
+        Modifiers {
+            alt: true,
+            ..Default::default()
+        }
+    }
+
     /// `S` and `X` deliberately match Shotcut, and `Ctrl+S` must still save.
     #[test]
     fn shotcut_timeline_keys() {
@@ -165,6 +184,19 @@ mod tests {
         assert_eq!(map_key(Key::X, plain()), Some(Action::RippleDelete));
         assert_eq!(map_key(Key::S, ctrl()), Some(Action::SaveProject));
         assert_eq!(map_key(Key::S, ctrl_shift()), Some(Action::SaveProjectAs));
+    }
+
+    /// Shotcut's edit-point navigation, alongside the brief's Up/Down.
+    #[test]
+    fn alt_arrows_move_between_edit_points() {
+        assert_eq!(map_key(Key::ArrowLeft, alt()), Some(Action::PrevCut));
+        assert_eq!(map_key(Key::ArrowRight, alt()), Some(Action::NextCut));
+        assert_eq!(map_key(Key::ArrowUp, plain()), Some(Action::PrevCut));
+        assert_eq!(map_key(Key::ArrowDown, plain()), Some(Action::NextCut));
+        // Alt must not swallow stepping or reordering.
+        assert_eq!(map_key(Key::ArrowLeft, plain()), Some(Action::StepFrames(-1)));
+        assert_eq!(map_key(Key::ArrowLeft, ctrl()), Some(Action::MoveEarlier));
+        assert_eq!(map_key(Key::A, alt()), None);
     }
 
     #[test]
@@ -239,6 +271,7 @@ mod tests {
             Action::ZoomIn,
             Action::ZoomOut,
             Action::ZoomFit,
+            Action::ToggleFullscreen,
             Action::ToggleHelp,
         ];
         let all_keys = [
@@ -246,7 +279,7 @@ mod tests {
             Key::ArrowUp, Key::ArrowDown, Key::Home, Key::End, Key::I, Key::O,
             Key::X, Key::A, Key::Enter, Key::V, Key::Delete, Key::Backspace,
             Key::OpenBracket, Key::CloseBracket, Key::S, Key::E, Key::Z,
-            Key::Tab, Key::Minus, Key::Equals, Key::Num0, Key::Questionmark,
+            Key::Tab, Key::Minus, Key::Equals, Key::Num0, Key::Questionmark, Key::F11,
         ];
         let mut produced = Vec::new();
         for k in all_keys {

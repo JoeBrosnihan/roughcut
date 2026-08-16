@@ -18,6 +18,37 @@ pub struct Settings {
     pub volume: f64,
     pub last_project_dir: Option<PathBuf>,
     pub last_import_dir: Option<PathBuf>,
+    /// Where the window was last time, so it opens where you left it instead
+    /// of at a fixed size every launch. Windows does not remember this for an
+    /// application; applications remember it for themselves.
+    pub window: Option<WindowGeometry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// Recorded separately: the position and size above are the *restored*
+    /// ones, so un-maximising puts the window back somewhere sensible.
+    pub maximized: bool,
+}
+
+impl WindowGeometry {
+    /// Reject nonsense before handing it to the window system — a saved
+    /// position from a monitor that is no longer attached, or a size from a
+    /// resolution that no longer exists.
+    pub fn is_plausible(&self) -> bool {
+        self.width >= 640.0
+            && self.height >= 480.0
+            && self.width <= 32_000.0
+            && self.height <= 32_000.0
+            && self.x > -32_000.0
+            && self.y > -32_000.0
+            && self.x < 32_000.0
+            && self.y < 32_000.0
+    }
 }
 
 impl Default for Settings {
@@ -31,6 +62,7 @@ impl Default for Settings {
             volume: 80.0,
             last_project_dir: None,
             last_import_dir: None,
+            window: None,
         }
     }
 }
