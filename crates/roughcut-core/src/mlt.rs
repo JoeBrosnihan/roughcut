@@ -367,6 +367,7 @@ mod tests {
                     mark_out: Some(199),
                     rate_mismatch: false,
                     variable_rate: false,
+                    flagged: false,
                 },
                 SourceClip {
                     id: b,
@@ -393,6 +394,7 @@ mod tests {
                     mark_out: None,
                     rate_mismatch: false,
                     variable_rate: false,
+                    flagged: false,
                 },
             ],
             timeline: vec![

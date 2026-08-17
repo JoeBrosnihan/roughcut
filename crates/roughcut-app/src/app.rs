@@ -1192,6 +1192,32 @@ impl RoughcutApp {
         self.set_status(format!("{name} is now {w}x{h}"), StatusKind::Info);
     }
 
+    /// Toggle whether a clip is flagged as worth using.
+    ///
+    /// Undoable, like any other edit to the project — flagging a folder of
+    /// footage is real work, and losing it to a misclick would be as annoying
+    /// as losing a cut.
+    pub fn toggle_flag(&mut self, id: ClipId) {
+        let mut now = false;
+        self.edit(|p| match p.clip_mut(id) {
+            Some(c) => {
+                c.flagged = !c.flagged;
+                now = c.flagged;
+                true
+            }
+            None => false,
+        });
+        let name = self.project.clip(id).map(|c| c.file_name()).unwrap_or_default();
+        self.set_status(
+            if now {
+                format!("flagged {name}")
+            } else {
+                format!("unflagged {name}")
+            },
+            StatusKind::Info,
+        );
+    }
+
     /// Open the system file manager with this clip selected.
     pub fn reveal_clip(&mut self, id: ClipId) {
         let Some(clip) = self.project.clip(id) else {

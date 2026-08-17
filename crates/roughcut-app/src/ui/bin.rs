@@ -287,6 +287,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let duration = format_timecode(duration_frames, app.project.fps());
     let rate_mismatch = clip.rate_mismatch;
     let variable_rate = clip.variable_rate;
+    let flagged = clip.flagged;
     let missing = !clip.path.exists();
     let has_proxy = clip.proxy_path.as_ref().is_some_and(|p| p.exists());
     let marked = clip.mark_in.is_some() || clip.mark_out.is_some();
@@ -352,6 +353,20 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         painter.line_segment(
             [egui::pos2(x, thumb.top()), egui::pos2(x, thumb.bottom())],
             egui::Stroke::new(1.0, theme::PLAYHEAD),
+        );
+    }
+
+    // The flag, top right: clear of the status badges on the left and the
+    // duration below, and the only warm mark on the tile.
+    if flagged {
+        let at = thumb.right_top() + egui::vec2(-9.0, 9.0);
+        painter.circle_filled(at, 7.5, egui::Color32::from_black_alpha(190));
+        painter.text(
+            at,
+            egui::Align2::CENTER_CENTER,
+            "\u{2605}",
+            egui::FontId::proportional(11.0),
+            theme::FLAG,
         );
     }
 
@@ -453,7 +468,13 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
             StrokeKind::Inside,
         );
     }
-    if response.clicked() {
+    // Middle-click, or Ctrl with the left button, flags the clip instead of
+    // selecting it. Both are reachable without leaving the contact sheet,
+    // which is the point: culling is a pass you do at speed.
+    let ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+    if response.clicked_by(egui::PointerButton::Middle) || (response.clicked() && ctrl) {
+        app.toggle_flag(id);
+    } else if response.clicked() {
         // Opens at the start, not at the frame under the pointer. Skimming is
         // for finding the clip you want; once you have picked it you want to
         // watch it, and landing at whatever moment the pointer happened to be
@@ -473,6 +494,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let mut remove = false;
     let mut relink = false;
     let mut reveal = false;
+    let mut flag = false;
     let mut turn = None;
     let rotating = app.rotating.contains(&id);
     response.context_menu(|ui| {
@@ -501,6 +523,15 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
                     .color(theme::TEXT_DIM),
             );
         }
+        if ui
+            .button(if flagged { "Unflag" } else { "Flag as good" })
+            .on_hover_text("Middle-click, or Ctrl+click, a clip to toggle this")
+            .clicked()
+        {
+            flag = true;
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        ui.separator();
         if ui.button("Show in folder").clicked() {
             reveal = true;
             ui.close_kind(egui::UiKind::Menu);
@@ -525,6 +556,9 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     });
     if relink {
         app.relink_dialog(id);
+    }
+    if flag {
+        app.toggle_flag(id);
     }
     if reveal {
         app.reveal_clip(id);

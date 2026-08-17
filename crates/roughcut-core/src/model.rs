@@ -146,6 +146,12 @@ pub struct SourceClip {
     /// as exact as its average. Recorded so the bin can say so.
     #[serde(default)]
     pub variable_rate: bool,
+    /// Picked out as worth using, before deciding where. Culling and
+    /// assembling are separate passes: on a first watch you know a clip is
+    /// good long before you know what it follows, and the timeline is the
+    /// wrong place to park that judgement.
+    #[serde(default)]
+    pub flagged: bool,
 }
 
 fn minus_one() -> i32 {

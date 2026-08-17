@@ -244,6 +244,7 @@ mod tests {
             mark_out: Some(20),
             rate_mismatch: false,
             variable_rate: false,
+            flagged: true,
         });
         p
     }
@@ -256,6 +257,9 @@ mod tests {
         save(&p, &path).unwrap();
         let back = load(&path).unwrap();
         assert_eq!(p, back);
+        // Flagging a folder of footage is real work; it has to outlive the
+        // session that did it.
+        assert!(back.clips[0].flagged);
         let _ = fs::remove_dir_all(&dir);
     }
 

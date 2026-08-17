@@ -17,6 +17,10 @@ pub const MARK_OUT: Color32 = Color32::from_rgb(0xff, 0x8c, 0x42);
 pub const CLIP: Color32 = Color32::from_rgb(0x2e, 0x3a, 0x4c);
 pub const CLIP_SELECTED: Color32 = Color32::from_rgb(0x33, 0x50, 0x78);
 pub const PLAYHEAD: Color32 = Color32::from_rgb(0xff, 0xd8, 0x4c);
+/// Clips flagged as worth using. Warm, and deliberately unlike every status
+/// colour: a flag is a judgement you made, not something the tool is telling
+/// you about the file.
+pub const FLAG: Color32 = Color32::from_rgb(0xff, 0xc8, 0x4c);
 pub const VIDEO_LETTERBOX: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0b);
 
 /// Width of the accent border marking the focused region.

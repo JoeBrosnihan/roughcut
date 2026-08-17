@@ -59,6 +59,7 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         mark_out: None,
         rate_mismatch,
         variable_rate: info.variable_rate,
+        flagged: false,
     });
 
     crate::profile::refresh_working(project);
