@@ -407,6 +407,12 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         None if has_proxy => badge("PXY", theme::MARK_IN),
         None => {}
     }
+    // Whether this clip is in the cut, and how many times. It is the question
+    // the bin gets asked most while assembling — "have I used this one yet?" —
+    // and it was previously only answerable by opening the context menu.
+    if uses > 0 {
+        badge(&format!("×{uses}"), theme::ACCENT);
+    }
 
     // Name below the picture.
     let max_chars = ((rect.width() - 6.0) / 5.6).max(4.0) as usize;
@@ -518,11 +524,16 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     }
 
     response.on_hover_text(format!(
-        "{name}\n{path}\n{duration_frames} frames{}",
+        "{name}\n{path}\n{duration_frames} frames{}{}",
         if rate_mismatch {
             "\nframe rate differs from the project — MLT will resample"
         } else {
             ""
+        },
+        match uses {
+            0 => String::new(),
+            1 => "\nused once on the timeline".to_string(),
+            n => format!("\nused {n} times on the timeline"),
         }
     ));
 }
