@@ -13,13 +13,13 @@ use crate::video::{shared as shared_video, SharedVideo};
 use crate::workers::{Job, JobResult, WorkerPool};
 use crate::{keys, theme, ui};
 
-use roughcut_core::import::{add_clip, ImportOutcome};
+use roughcut_core::import::{add_clip, remeasure, ImportOutcome};
 use roughcut_core::mlt::{self, ExportOptions};
 use roughcut_core::model::{ClipId, Project};
 use roughcut_core::probe::MediaInfo;
 use roughcut_core::project_io;
 use roughcut_core::rotate::Turn;
-use roughcut_core::time::Rational;
+use roughcut_core::time::{format_timecode, Rational};
 use roughcut_core::timeline;
 use roughcut_core::tools::{expand_drop, Tools};
 use roughcut_core::undo::History;
@@ -1192,6 +1192,24 @@ impl RoughcutApp {
         self.set_status(format!("{name} is now {w}x{h}"), StatusKind::Info);
     }
 
+    /// Open the system file manager with this clip selected.
+    pub fn reveal_clip(&mut self, id: ClipId) {
+        let Some(clip) = self.project.clip(id) else {
+            return;
+        };
+        let path = clip.path.clone();
+        if !path.exists() {
+            self.set_status(
+                format!("{} is not where the project expects it", clip.file_name()),
+                StatusKind::Warn,
+            );
+            return;
+        }
+        if let Err(e) = reveal(&path) {
+            self.set_status(format!("cannot show that folder: {e}"), StatusKind::Warn);
+        }
+    }
+
     // --- file operations ----------------------------------------------------
 
     fn import_dialog(&mut self) {
@@ -1346,6 +1364,7 @@ impl RoughcutApp {
                 self.source_frame = 0;
                 self.playhead = 0;
                 self.missing_media = project_io::missing_media(&self.project);
+                self.revalidate_clips();
                 if let Some(dir) = path.parent() {
                     self.settings.last_project_dir = Some(dir.to_path_buf());
                 }
@@ -1589,18 +1608,22 @@ impl RoughcutApp {
         let was_empty = self.project.clips.is_empty();
         let before = self.project.profile.clone();
         let mut new_id = None;
+        let mut duplicate = None;
         self.edit(|p| match add_clip(p, &path, &info) {
             ImportOutcome::Added(id) => {
                 new_id = Some(id);
                 true
             }
-            ImportOutcome::Duplicate(_) => false,
+            ImportOutcome::Duplicate(id) => {
+                duplicate = Some(id);
+                false
+            }
         });
+        if let Some(id) = duplicate {
+            self.apply_remeasure(id, &path, &info);
+            return;
+        }
         let Some(id) = new_id else {
-            log::info!(
-                "{} is already in the bin",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
             return;
         };
 
@@ -1659,6 +1682,70 @@ impl RoughcutApp {
             info: Box::new(info),
             proxy_dir: dir,
         });
+    }
+
+    /// Correct a clip in the bin against a fresh probe of its file.
+    ///
+    /// Silent when nothing moved, which is the ordinary case. When something
+    /// does move it is worth saying so plainly: the project on disk recorded
+    /// something about this file that is not true, and cuts may have been
+    /// pulled back to fit.
+    fn apply_remeasure(&mut self, id: ClipId, path: &Path, info: &MediaInfo) {
+        let before = self.project.clip(id).map(|c| c.duration_frames).unwrap_or(0);
+        let mut outcome = roughcut_core::import::Remeasured::default();
+        self.edit(|p| {
+            outcome = remeasure(p, id, info);
+            outcome.any()
+        });
+        if !outcome.any() {
+            return;
+        }
+        let after = self.project.clip(id).map(|c| c.duration_frames).unwrap_or(0);
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let fps = self.project.fps();
+        self.set_status(
+            format!(
+                "{name} is {} long, not {}{}",
+                format_timecode(after, fps),
+                format_timecode(before, fps),
+                if outcome.trimmed {
+                    " — cuts using it were pulled back to fit"
+                } else {
+                    ""
+                }
+            ),
+            StatusKind::Warn,
+        );
+        // Anything derived from the old length is now wrong.
+        self.posters.remove(&id);
+        self.sheets.remove(&id);
+        self.thumb_requested.remove(&id);
+        self.sheet_requested.remove(&id);
+        self.monitor.reload();
+    }
+
+    /// Re-probe everything in the bin, cheaply and in the background.
+    ///
+    /// Run when a project is opened. A project outlives the code that wrote
+    /// it, and a clip measured wrongly by an older Roughcut stays wrong on
+    /// disk forever otherwise — silently, until playback runs out of picture
+    /// early or MLT is handed an out point past the end of the file. ffprobe
+    /// costs a few milliseconds per file and these run ahead of thumbnails,
+    /// so the cost is invisible.
+    fn revalidate_clips(&mut self) {
+        if self.tools.ffprobe.is_none() {
+            return;
+        }
+        let paths: Vec<PathBuf> = self
+            .project
+            .clips
+            .iter()
+            .filter(|c| c.path.exists())
+            .map(|c| c.path.clone())
+            .collect();
+        for path in paths {
+            self.workers.submit(Job::Probe { path });
+        }
     }
 
     fn request_thumbnail(&mut self, id: ClipId) {
@@ -1835,5 +1922,33 @@ impl eframe::App for RoughcutApp {
         // quit on purpose.
         self.autosave_pending = true;
         self.flush_autosave();
+    }
+}
+
+/// Show a file in the system file manager, selected rather than opened.
+fn reveal(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // `explorer /select,<path>` exits non-zero even when it works, so the
+        // status is deliberately not checked — only the spawn is.
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(path))
+            .spawn()
+            .map(|_| ())
     }
 }

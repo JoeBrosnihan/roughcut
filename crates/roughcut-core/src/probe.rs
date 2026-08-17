@@ -22,8 +22,15 @@ pub struct MediaInfo {
     pub rotation: i32,
     /// Exact rational from `r_frame_rate`.
     pub fps: Rational,
-    /// Frame count in the file's own time base.
+    /// Frame count in the file's own time base, always consistent with `fps`
+    /// and the file's real duration — see [`frame_count`].
     pub native_frames: i64,
+    /// The file records more frames than its nominal rate and duration allow,
+    /// which is what a variable frame rate looks like from outside. Positions
+    /// in such a file are only as exact as its average rate; the count above
+    /// is taken from the duration so playback and export at least agree about
+    /// when the clip ends.
+    pub variable_rate: bool,
     pub sample_aspect_num: u32,
     pub sample_aspect_den: u32,
     pub progressive: bool,
@@ -134,7 +141,7 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
         .ok_or_else(|| anyhow!("video stream has no usable frame rate"))?
         .reduced();
 
-    let native_frames = frame_count(video, json, fps)?;
+    let (native_frames, variable_rate) = frame_count(video, json, fps)?;
 
     let (sar_n, sar_d) = video
         .get("sample_aspect_ratio")
@@ -179,6 +186,7 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
         rotation,
         fps,
         native_frames,
+        variable_rate,
         sample_aspect_num: sar_n,
         sample_aspect_den: sar_d,
         progressive,
@@ -189,43 +197,78 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
     })
 }
 
-/// Frame count, in decreasing order of trustworthiness. `-count_frames` is
-/// never used: it decodes the whole file and would make import unusable.
-fn frame_count(video: &Value, json: &Value, fps: Rational) -> Result<i64> {
-    // 1. Container-recorded frame count.
-    if let Some(n) = video
+/// Frame count, and whether the file turned out to be variable rate.
+///
+/// `-count_frames` is never used: it decodes the whole file and would make
+/// import unusable.
+///
+/// The count has to agree with `fps` about when the clip ends, because that
+/// agreement is what the rest of Roughcut is built on — playback drives mpv in
+/// seconds, seeking converts back, and MLT is handed frame numbers at the
+/// profile rate. A phone shooting variable rate breaks it badly: one nominally
+/// 24 fps clip records 8653 frames across 319 seconds, which is 27 fps really,
+/// and trusting that count makes Roughcut believe the clip runs 41 seconds
+/// longer than it does. Playback then ends on mpv running out of file, tens of
+/// seconds early, and rolls on to the next cut.
+///
+/// So the container's count is used only where it agrees with the duration,
+/// and the duration wins wherever they disagree.
+fn frame_count(video: &Value, json: &Value, fps: Rational) -> Result<(i64, bool)> {
+    let seconds = duration_seconds(video, json);
+    let from_duration = seconds
+        .map(|s| (s * fps.as_f64()).round() as i64)
+        .filter(|&n| n > 0);
+    let recorded = video
         .get("nb_frames")
         .and_then(str_or_num)
-        .filter(|&n| n > 0)
-    {
-        return Ok(n);
-    }
-    // 2. Stream duration in its own time base.
-    if let (Some(dts), Some(tb)) = (
-        video.get("duration_ts").and_then(Value::as_i64),
-        video.get("time_base").and_then(Value::as_str).and_then(parse_ratio),
-    ) {
-        if dts > 0 && tb.num > 0 && tb.den > 0 {
-            let secs = dts as f64 * tb.num as f64 / tb.den as f64;
-            let n = (secs * fps.as_f64()).round() as i64;
-            if n > 0 {
-                return Ok(n);
+        .filter(|&n| n > 0);
+
+    match (recorded, from_duration, seconds) {
+        (Some(recorded), Some(derived), Some(seconds)) => {
+            // Tolerate a frame or so at either end: a trailing partial frame
+            // is ordinary and does not make a file variable rate. Beyond that
+            // the two sources genuinely disagree about the clip's length.
+            let slack = ((seconds * 0.01) * fps.as_f64()).max(2.0);
+            if ((recorded - derived).abs() as f64) <= slack {
+                Ok((recorded, false))
+            } else {
+                Ok((derived, true))
             }
         }
+        (Some(recorded), None, _) => Ok((recorded, false)),
+        (None, Some(derived), _) => Ok((derived, false)),
+        _ => bail!("cannot determine a frame count for this file"),
     }
-    // 3. Stream duration in seconds.
+}
+
+/// The clip's real length in seconds, preferring the stream's own timing to
+/// the container's.
+fn duration_seconds(video: &Value, json: &Value) -> Option<f64> {
+    if let (Some(dts), Some(tb)) = (
+        video.get("duration_ts").and_then(Value::as_i64),
+        video
+            .get("time_base")
+            .and_then(Value::as_str)
+            .and_then(parse_ratio),
+    ) {
+        if dts > 0 && tb.num > 0 && tb.den > 0 {
+            return Some(dts as f64 * tb.num as f64 / tb.den as f64);
+        }
+    }
     for holder in [Some(video), json.get("format")].into_iter().flatten() {
         if let Some(secs) = holder
             .get("duration")
-            .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()))
+            .and_then(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| v.as_f64())
+            })
+            .filter(|s| *s > 0.0)
         {
-            let n = (secs * fps.as_f64()).round() as i64;
-            if n > 0 {
-                return Ok(n);
-            }
+            return Some(secs);
         }
     }
-    bail!("cannot determine a frame count for this file")
+    None
 }
 
 /// The display-matrix rotation, normalised to 0/90/180/270 counter-clockwise.
@@ -342,6 +385,52 @@ mod tests {
         assert_eq!(p.frame_rate_num, 30000);
         assert_eq!(p.frame_rate_den, 1001);
         assert_eq!(p.display_aspect(), (16, 9));
+    }
+
+    /// The real shape of the bug, taken from the file that produced it: an
+    /// iPhone clip nominally 24 fps holding 8653 frames across 319 seconds,
+    /// i.e. 27 fps really. Trusting the frame count made Roughcut believe the
+    /// clip ran 41 seconds longer than it does, so timeline playback ended
+    /// early and jumped to the next cut.
+    #[test]
+    fn a_variable_rate_file_is_measured_by_its_duration() {
+        let mut v = hd_probe();
+        v["streams"][0]["r_frame_rate"] = json!("24/1");
+        v["streams"][0]["avg_frame_rate"] = json!("5191800/191537");
+        v["streams"][0]["nb_frames"] = json!("8653");
+        v["streams"][0]["time_base"] = json!("1/600");
+        v["streams"][0]["duration_ts"] = json!(191536);
+        v["streams"][0]["duration"] = json!("319.226667");
+        v["format"]["duration"] = json!("319.226700");
+
+        let info = parse_probe_json(&v).unwrap();
+        assert!(info.variable_rate, "this file is not constant rate");
+        // 319.2267 s at 24 fps, not the 8653 frames the container claims.
+        assert_eq!(info.native_frames, 7661);
+        // The invariant the rest of Roughcut depends on: the clip runs out of
+        // frames exactly when the file runs out of picture.
+        let implied = info.native_frames as f64 / info.fps.as_f64();
+        assert!(
+            (implied - 319.2267).abs() < 0.5,
+            "{implied} s of frames for a 319.2 s file"
+        );
+    }
+
+    #[test]
+    fn a_constant_rate_file_keeps_its_recorded_count() {
+        let info = parse_probe_json(&hd_probe()).unwrap();
+        assert!(!info.variable_rate);
+        assert_eq!(info.native_frames, 300);
+    }
+
+    #[test]
+    fn a_trailing_partial_frame_is_not_a_variable_rate() {
+        // A frame short of the duration is ordinary and must not trip it.
+        let mut v = hd_probe();
+        v["streams"][0]["nb_frames"] = json!("299");
+        let info = parse_probe_json(&v).unwrap();
+        assert!(!info.variable_rate);
+        assert_eq!(info.native_frames, 299);
     }
 
     #[test]

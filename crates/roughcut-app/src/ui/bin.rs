@@ -286,6 +286,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let duration_frames = clip.duration_frames;
     let duration = format_timecode(duration_frames, app.project.fps());
     let rate_mismatch = clip.rate_mismatch;
+    let variable_rate = clip.variable_rate;
     let missing = !clip.path.exists();
     let has_proxy = clip.proxy_path.as_ref().is_some_and(|p| p.exists());
     let marked = clip.mark_in.is_some() || clip.mark_out.is_some();
@@ -400,6 +401,11 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         // §5 rule 5: frame-exactness is not guaranteed for this clip.
         badge("FPS", theme::WARN);
     }
+    if variable_rate {
+        // The file does not hold a steady rate, so its positions are only as
+        // exact as its average. Worth saying, since it is invisible otherwise.
+        badge("VFR", theme::WARN);
+    }
     match proxy_state {
         Some(ProxyState::Queued) => badge("PXY…", theme::TEXT_DIM),
         Some(ProxyState::Running) => badge("PXY▶", theme::ACCENT),
@@ -466,6 +472,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
 
     let mut remove = false;
     let mut relink = false;
+    let mut reveal = false;
     let mut turn = None;
     let rotating = app.rotating.contains(&id);
     response.context_menu(|ui| {
@@ -494,6 +501,10 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
                     .color(theme::TEXT_DIM),
             );
         }
+        if ui.button("Show in folder").clicked() {
+            reveal = true;
+            ui.close_kind(egui::UiKind::Menu);
+        }
         ui.separator();
         ui.add_enabled_ui(uses == 0, |ui| {
             if ui.button("Remove from bin").clicked() {
@@ -514,6 +525,9 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     });
     if relink {
         app.relink_dialog(id);
+    }
+    if reveal {
+        app.reveal_clip(id);
     }
     if let Some(turn) = turn {
         app.rotate_clip(id, turn);

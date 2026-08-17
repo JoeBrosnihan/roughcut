@@ -58,10 +58,103 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         mark_in: None,
         mark_out: None,
         rate_mismatch,
+        variable_rate: info.variable_rate,
     });
 
     crate::profile::refresh_working(project);
     ImportOutcome::Added(id)
+}
+
+/// What changed when a clip was measured again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Remeasured {
+    /// The clip turned out to be a different length than the project recorded.
+    pub duration_changed: bool,
+    /// Marks or timeline cuts pointed past the end and had to be pulled back.
+    pub trimmed: bool,
+}
+
+impl Remeasured {
+    pub fn any(&self) -> bool {
+        self.duration_changed || self.trimmed
+    }
+}
+
+/// Measure a clip already in the bin against a fresh probe, and correct the
+/// project if it disagrees.
+///
+/// Needed because a project can outlive a bug in the measuring. Variable-rate
+/// phone video was recorded at its container's frame count, which for one
+/// clip was 41 seconds longer than the file really runs; every mark and cut
+/// made against that clip refers to frames that do not exist. Nothing else
+/// notices until playback runs out of picture early, or the export hands MLT
+/// an out point past the end of the file.
+///
+/// Only ever shortens or lengthens to what the file actually is, and pulls
+/// marks and cuts back inside it. Cuts that would be left empty are dropped,
+/// since a zero-length cut is not something the timeline can represent.
+pub fn remeasure(project: &mut Project, id: ClipId, info: &MediaInfo) -> Remeasured {
+    let profile_fps = project.fps();
+    let native_fps = info.fps.reduced();
+    let rate_mismatch = native_fps != profile_fps;
+    let duration = if rate_mismatch {
+        convert_frames(info.native_frames, native_fps, profile_fps)
+    } else {
+        info.native_frames
+    }
+    .max(1);
+
+    let Some(clip) = project.clip_mut(id) else {
+        return Remeasured::default();
+    };
+    let mut out = Remeasured {
+        duration_changed: clip.duration_frames != duration,
+        trimmed: false,
+    };
+
+    clip.duration_frames = duration;
+    clip.native_frames = info.native_frames.max(1);
+    clip.native_fps_num = native_fps.num;
+    clip.native_fps_den = native_fps.den;
+    clip.width = info.width;
+    clip.height = info.height;
+    clip.sample_aspect_num = info.sample_aspect_num;
+    clip.sample_aspect_den = info.sample_aspect_den;
+    clip.progressive = info.progressive;
+    clip.colorspace = info.colorspace;
+    clip.rate_mismatch = rate_mismatch;
+    clip.variable_rate = info.variable_rate;
+
+    let last = duration - 1;
+    for m in [&mut clip.mark_in, &mut clip.mark_out].into_iter().flatten() {
+        if *m > last {
+            *m = last;
+            out.trimmed = true;
+        }
+    }
+
+    let before = project.timeline.len();
+    project.timeline.retain_mut(|item| {
+        if item.clip_id != id {
+            return true;
+        }
+        if item.in_frame > last {
+            return false;
+        }
+        if item.out_frame > last {
+            item.out_frame = last;
+        }
+        item.out_frame >= item.in_frame
+    });
+    if project.timeline.len() != before
+        || project
+            .timeline
+            .iter()
+            .any(|i| i.clip_id == id && i.out_frame == last)
+    {
+        out.trimmed |= project.timeline.len() != before;
+    }
+    out
 }
 
 fn absolutise(path: &Path) -> std::path::PathBuf {
@@ -85,6 +178,7 @@ mod tests {
             height: h,
             rotation: 0,
             fps,
+            variable_rate: false,
             native_frames: frames,
             sample_aspect_num: 1,
             sample_aspect_den: 1,
@@ -130,6 +224,53 @@ mod tests {
         assert!(matches!(a, ImportOutcome::Added(_)));
         assert!(matches!(b, ImportOutcome::Duplicate(_)));
         assert_eq!(p.clips.len(), 1);
+    }
+
+    /// A project written before variable-rate files were measured correctly
+    /// holds cuts that run past the end of the media. Re-measuring must pull
+    /// them back rather than leave MLT an out point that does not exist.
+    #[test]
+    fn remeasuring_shortens_the_clip_and_the_cuts_that_use_it() {
+        let mut p = Project::new();
+        add_clip(&mut p, Path::new("/m/a.mp4"), &info(1920, 1080, Rational::new(24, 1), 8653));
+        let id = p.clips[0].id;
+        p.clips[0].mark_in = Some(100);
+        p.clips[0].mark_out = Some(8000);
+        // Three cuts: wholly inside, straddling the new end, wholly past it.
+        assert!(crate::timeline::append(&mut p, id, 0, 99));
+        assert!(crate::timeline::append(&mut p, id, 7000, 8652));
+        assert!(crate::timeline::append(&mut p, id, 8000, 8652));
+
+        // What the file really is: 319.2 s at 24 fps.
+        let truth = info(1920, 1080, Rational::new(24, 1), 7661);
+        let out = remeasure(&mut p, id, &truth);
+
+        assert!(out.duration_changed);
+        assert!(out.trimmed);
+        assert_eq!(p.clips[0].duration_frames, 7661);
+        // The mark that pointed past the end came back to it; the other stayed.
+        assert_eq!(p.clips[0].mark_in, Some(100));
+        assert_eq!(p.clips[0].mark_out, Some(7660));
+        // The cut wholly past the end is gone, the straddling one was clipped,
+        // and the one that was always valid is untouched.
+        assert_eq!(p.timeline.len(), 2);
+        assert_eq!((p.timeline[0].in_frame, p.timeline[0].out_frame), (0, 99));
+        assert_eq!((p.timeline[1].in_frame, p.timeline[1].out_frame), (7000, 7660));
+        // Nothing may point past the media any more.
+        assert!(p.timeline.iter().all(|i| i.out_frame < p.clips[0].duration_frames));
+    }
+
+    #[test]
+    fn remeasuring_a_clip_that_has_not_changed_does_nothing() {
+        let mut p = Project::new();
+        let i = info(1920, 1080, Rational::new(30, 1), 300);
+        add_clip(&mut p, Path::new("/m/a.mp4"), &i);
+        let id = p.clips[0].id;
+        assert!(crate::timeline::append(&mut p, id, 10, 200));
+        let before = p.clone();
+        let out = remeasure(&mut p, id, &i);
+        assert!(!out.any());
+        assert_eq!(p, before);
     }
 
     #[test]

@@ -142,6 +142,10 @@ pub struct SourceClip {
     /// Set when the source frame rate differs from the project profile.
     #[serde(default)]
     pub rate_mismatch: bool,
+    /// The file does not hold a steady frame rate, so its positions are only
+    /// as exact as its average. Recorded so the bin can say so.
+    #[serde(default)]
+    pub variable_rate: bool,
 }
 
 fn minus_one() -> i32 {

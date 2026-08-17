@@ -70,6 +70,7 @@ fn a_generated_proxy_maps_frame_for_frame() {
         mark_in: None,
         mark_out: None,
         rate_mismatch: false,
+        variable_rate: false,
     };
 
     let proxy_dir = dir.join("proxies");

@@ -399,6 +399,7 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                         mark_in: None,
                         mark_out: None,
                         rate_mismatch: false,
+                        variable_rate: false,
                     };
                     proxy::generate(ffmpeg, ffprobe, &stub, &info, &proxy_dir)
                 }

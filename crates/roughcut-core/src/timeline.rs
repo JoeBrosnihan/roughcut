@@ -252,6 +252,7 @@ mod tests {
             mark_in: None,
             mark_out: None,
             rate_mismatch: false,
+            variable_rate: false,
         });
         id
     }

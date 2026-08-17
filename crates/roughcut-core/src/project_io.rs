@@ -243,6 +243,7 @@ mod tests {
             mark_in: Some(10),
             mark_out: Some(20),
             rate_mismatch: false,
+            variable_rate: false,
         });
         p
     }

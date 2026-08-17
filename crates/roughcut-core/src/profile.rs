@@ -187,6 +187,7 @@ mod tests {
             height: h,
             rotation: 0,
             fps,
+            variable_rate: false,
             native_frames: frames,
             sample_aspect_num: 1,
             sample_aspect_den: 1,

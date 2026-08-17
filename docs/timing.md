@@ -122,3 +122,30 @@ Sheets are cached on disk and evicted from memory least-recently-seen, capped
 at 48 resident; posters are small enough to keep for every clip. A clip
 scrolled out of sight for long enough loses only the ability to scrub until the
 cache hands it back.
+
+## Variable frame rate
+
+Phones shoot it constantly, and it breaks the one agreement everything else
+rests on: that the frame count and the frame rate say the same thing about when
+a clip ends. Playback drives mpv in seconds, seeking converts back, and MLT is
+handed frame numbers at the profile rate — all of which assume
+`frames / rate == duration`.
+
+`r_frame_rate` on such a file is the *nominal* rate, and `nb_frames` is the real
+count, and the two do not reconcile. One clip in a test folder reports 24 fps
+and 8653 frames across 319 seconds; that is 27 fps really, and believing the
+count makes Roughcut think the clip runs 41 seconds longer than it does. The
+symptom is timeline playback ending on mpv running out of file, tens of seconds
+early, and rolling on to the next cut.
+
+So the container's frame count is used only where it agrees with the duration,
+and the duration wins wherever they disagree. The nominal rate is kept — it is
+the sane, round number, and inventing a profile of 5191800/191537 fps to
+preserve every frame would be worse everywhere else — and the clip is flagged
+`VFR` in the bin, since its positions are only as exact as its average rate.
+
+Opening a project re-probes every clip, because a project outlives the code
+that wrote it: a clip measured wrongly by an older Roughcut stays wrong on disk
+otherwise. Where the file disagrees with what was recorded, the clip is
+corrected and any marks or cuts pointing past the end are pulled back to fit,
+which is said plainly rather than done silently.
