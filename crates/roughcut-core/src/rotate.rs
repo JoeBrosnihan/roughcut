@@ -66,24 +66,27 @@ pub fn rotate_in_place(
     let temp = temp_sibling(path);
     let _ = std::fs::remove_file(&temp);
 
-    let output = quiet_command(ffmpeg)
-        .args(["-y", "-v", "error", "-display_rotation"])
-        .arg(target.to_string())
-        .arg("-i")
-        .arg(path)
-        // Every stream, copied verbatim: audio, timecode and subtitles ride
-        // along untouched.
-        .args(["-map", "0", "-c", "copy"])
-        .arg(&temp)
-        .output()
-        .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
-
-    if !output.status.success() {
+    // The muxer is normally chosen from the file's extension, which is right
+    // almost always. It is wrong for the codecs QuickTime never specified: a
+    // .MOV holding VP9 or AV1 is something phones and screen recorders write
+    // happily, but ffmpeg's `mov` muxer refuses to write it back out. The MP4
+    // muxer accepts them and produces a file QuickTime and everything else
+    // still open, so a rejection is retried that way rather than reported.
+    let mut result = run_ffmpeg(ffmpeg, path, &temp, target, None)?;
+    if !result.0 && mp4_family(path) {
+        let _ = std::fs::remove_file(&temp);
+        log::debug!(
+            "the container's own muxer rejected {}; retrying as mp4",
+            path.display()
+        );
+        result = run_ffmpeg(ffmpeg, path, &temp, target, Some("mp4"))?;
+    }
+    if !result.0 {
         let _ = std::fs::remove_file(&temp);
         bail!(
             "ffmpeg could not rotate {}: {}",
             path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            result.1.trim()
         );
     }
 
@@ -119,6 +122,42 @@ pub fn rotate_in_place(
 
     replace(&temp, path)?;
     Ok(after)
+}
+
+/// One rewrite attempt. Returns whether it succeeded, and ffmpeg's stderr.
+fn run_ffmpeg(
+    ffmpeg: &Path,
+    path: &Path,
+    temp: &Path,
+    target: i32,
+    force_format: Option<&str>,
+) -> Result<(bool, String)> {
+    let mut cmd = quiet_command(ffmpeg);
+    cmd.args(["-y", "-v", "error", "-display_rotation"])
+        .arg(target.to_string())
+        .arg("-i")
+        .arg(path)
+        // Every stream, copied verbatim: audio, timecode and subtitles ride
+        // along untouched.
+        .args(["-map", "0", "-c", "copy"]);
+    if let Some(f) = force_format {
+        cmd.args(["-f", f]);
+    }
+    let output = cmd
+        .arg(temp)
+        .output()
+        .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// Whether the MP4 muxer is a reasonable substitute for this file's own.
+fn mp4_family(path: &Path) -> bool {
+    path.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|e| matches!(e.as_str(), "mov" | "mp4" | "m4v" | "m4a" | "3gp" | "3g2"))
 }
 
 /// Swap the rewritten file in for the original.
@@ -205,6 +244,46 @@ mod tests {
             .filter(|n| n != "clip.mp4")
             .collect();
         assert!(strays.is_empty(), "left behind {strays:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A .MOV holding VP9 — what some phones and screen recorders write.
+    /// ffmpeg's `mov` muxer refuses to write it back out, so the rewrite has
+    /// to fall back to the MP4 muxer rather than reporting failure.
+    #[test]
+    fn a_codec_the_containers_own_muxer_refuses_still_rotates() {
+        let tools = Tools::discover();
+        let (Some(ffmpeg), Some(ffprobe)) = (tools.ffmpeg.clone(), tools.ffprobe.clone()) else {
+            eprintln!("SKIPPED: ffmpeg and ffprobe are required");
+            return;
+        };
+        let dir = std::env::temp_dir().join("roughcut-rotate-vp9");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let clip = dir.join("vp9.MOV");
+        let built = quiet_command(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=320x180:rate=30:d=2")
+            .args([
+                "-frames:v", "60", "-c:v", "libvpx-vp9", "-speed", "8", "-f", "mp4",
+            ])
+            .arg(&clip)
+            .status()
+            .expect("cannot run ffmpeg");
+        if !built.success() {
+            eprintln!("SKIPPED: this ffmpeg cannot encode VP9");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let before = probe(&ffprobe, &clip).unwrap();
+        let after = rotate_in_place(&ffmpeg, &ffprobe, &clip, Turn::CounterClockwise)
+            .expect("the mp4 muxer fallback should have handled this");
+        assert_eq!(after.rotation, 90);
+        assert_eq!((after.width, after.height), (180, 320));
+        assert_eq!(after.native_frames, before.native_frames);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

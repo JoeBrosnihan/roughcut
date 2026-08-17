@@ -103,3 +103,22 @@ In current measurements it never fires: 0 corrections over hundreds of steps on
 both 4K long-GOP and 1080p all-intra material. It exists so that if the
 assumption behind `frame-step` ever stops holding, the result is a logged
 correction rather than a silently wrong cut.
+
+## Thumbnails, in two passes
+
+Every clip gets a one-frame **poster** before any clip gets its **scrub
+sheet** — 112 frames, one per pixel of the tile's width, so a single pixel of
+pointer movement lands on a frame that was really extracted. The bin is
+unusable until its pictures appear, and building scrub data for the first clip
+while the fortieth is still a grey rectangle gets that backwards.
+
+Priority alone would not be enough. It decides what comes off the queue next,
+not who is free to take it, so a reserved thread outside the pool takes nothing
+but interactive work — a rotation the user just asked for would otherwise sit
+behind four multi-second transcodes. It sleeps on a condvar essentially always,
+so reserving it costs nothing.
+
+Sheets are cached on disk and evicted from memory least-recently-seen, capped
+at 48 resident; posters are small enough to keep for every clip. A clip
+scrolled out of sight for long enough loses only the ability to scrub until the
+cache hands it back.

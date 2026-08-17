@@ -324,21 +324,18 @@ fn paint_block_filmstrip(
     canvas: Rect,
     item: &roughcut_core::TimelineItem,
 ) {
-    let Some(tex) = app.thumbnails.get(&item.clip_id) else {
+    let Some(thumb) = app.thumb(item.clip_id) else {
         return;
     };
     let Some(clip) = app.project.clip(item.clip_id) else {
         return;
     };
-    let tiles = workers::FILMSTRIP_FRAMES;
-    let sheet = tex.size_vec2();
-    if sheet.x <= 0.0 || sheet.y <= 0.0 || block.width() < 2.0 {
+    if block.width() < 2.0 {
         return;
     }
 
     // One picture, drawn at the block's height, keeping the tile's aspect.
-    let tile_aspect = (sheet.x / tiles as f32) / sheet.y;
-    let img_w = (block.height() * tile_aspect).max(8.0);
+    let img_w = (block.height() * thumb.tile_aspect()).max(8.0);
     let clipped = painter.with_clip_rect(block.intersect(canvas));
 
     // Only walk the visible span. Zoomed in, a block can be tens of thousands
@@ -353,14 +350,12 @@ fn paint_block_filmstrip(
         // Which source frame sits at this x, and therefore which tile.
         let t = ((x - block.left()) / block.width()).clamp(0.0, 1.0);
         let source = item.in_frame + (t * (len - 1) as f32) as i64;
-        let tile = workers::tile_for_frame(source, clip.duration_frames);
-        let u0 = tile as f32 / tiles as f32;
-        let u1 = (tile + 1) as f32 / tiles as f32;
+        let tile = workers::tile_for_frame(source, clip.duration_frames, thumb.tiles);
 
         clipped.image(
-            tex.id(),
+            thumb.tex.id(),
             Rect::from_min_size(egui::pos2(x, block.top()), egui::vec2(img_w, block.height())),
-            Rect::from_min_max(egui::pos2(u0, 0.0), egui::pos2(u1, 1.0)),
+            thumb.uv(tile),
             egui::Color32::WHITE,
         );
         x += img_w;

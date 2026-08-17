@@ -323,6 +323,20 @@ impl Monitor {
             return;
         }
 
+        // At most one seek in flight.
+        //
+        // Dragging the scrub bar produces a new target every pixel. Firing a
+        // seek for each one buries mpv in work it will never finish, and
+        // because it shares the GL context with the UI, everything on screen
+        // ends up moving at the rate frames come out of the decoder — the
+        // playhead included, which should never wait for a picture. Dropping
+        // the intermediate targets costs nothing: the next pass asks for
+        // wherever the pointer is by then, which is the only position that was
+        // ever wanted.
+        if self.pending.is_some() && !force {
+            return;
+        }
+
         if self.requested_frame == Some(frame) {
             // Already asked for this one. Once mpv has settled, check it
             // really landed where we asked — a step is only worth using if it

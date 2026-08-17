@@ -4,10 +4,9 @@
 //! the filename rarely does. Hovering a tile scrubs it, which makes the grid a
 //! contact sheet you can skim rather than a table you have to read.
 
-use crate::app::{Focus, ProxyState, RoughcutApp};
+use crate::app::{ProxyState, RoughcutApp};
 use crate::theme;
 use crate::ui::truncate_middle;
-use crate::workers;
 use egui::{CornerRadius, Rect, Sense, StrokeKind};
 use roughcut_core::model::ClipId;
 use roughcut_core::rotate::Turn;
@@ -97,6 +96,8 @@ fn grid(app: &mut RoughcutApp, ui: &mut egui::Ui, ids: &[ClipId]) {
             egui::vec2(TILE_W, TILE_H),
         );
         if ui.is_rect_visible(rect) {
+            // Scrub data is built for what you can see, not for the whole bin.
+            app.request_scrub_sheet(*id);
             tile(app, ui, *id, rect);
         }
     }
@@ -117,6 +118,8 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
 
     let mut action: Option<Action> = None;
     let mut recover = false;
+    let mut open_recent: Option<std::path::PathBuf> = None;
+    let mut clear_recents = false;
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.horizontal_centered(|ui| {
@@ -133,6 +136,7 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
                 if menu_item(ui, "Open project…", "Ctrl+O") {
                     action = Some(Action::OpenProject);
                 }
+                recents_menu(app, ui, &mut open_recent, &mut clear_recents);
                 if menu_item(ui, "Save", "Ctrl+S") {
                     action = Some(Action::SaveProject);
                 }
@@ -168,9 +172,67 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     if recover {
         app.recover_last_session();
     }
+    if let Some(path) = open_recent {
+        app.open_recent(&path);
+    }
+    if clear_recents {
+        app.clear_recents();
+    }
     if let Some(a) = action {
         app.dispatch(a);
     }
+}
+
+/// The recents submenu.
+///
+/// Shows the file name, since that is what anyone recognises, with the folder
+/// underneath only where two entries would otherwise read identically — the
+/// full path is on hover either way. A project whose file has since gone is
+/// left visible but disabled rather than quietly dropped, because vanishing
+/// entries are more confusing than dead ones.
+fn recents_menu(
+    app: &RoughcutApp,
+    ui: &mut egui::Ui,
+    open: &mut Option<std::path::PathBuf>,
+    clear: &mut bool,
+) {
+    let recents = app.settings.recent_projects.clone();
+    ui.add_enabled_ui(!recents.is_empty(), |ui| {
+        ui.menu_button("Open recent", |ui| {
+            ui.set_min_width(240.0);
+            let names: Vec<String> = recents
+                .iter()
+                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                .collect();
+            for (i, path) in recents.iter().enumerate() {
+                let ambiguous = names.iter().enumerate().any(|(j, n)| j != i && *n == names[i]);
+                let label = if ambiguous {
+                    let parent = path
+                        .parent()
+                        .and_then(|d| d.file_name())
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    format!("{}  —  {parent}", names[i])
+                } else {
+                    names[i].clone()
+                };
+                let exists = path.exists();
+                let response = ui.add_enabled(
+                    exists,
+                    egui::Button::new(truncate_middle(&label, 40)).frame(false),
+                );
+                if response.on_hover_text(path.display().to_string()).clicked() {
+                    *open = Some(path.clone());
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+            }
+            ui.separator();
+            if ui.button("Clear list").clicked() {
+                *clear = true;
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        });
+    });
 }
 
 /// A menu row with its keyboard equivalent shown on the right, so the menu
@@ -260,23 +322,24 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         .hover_pos()
         .filter(|p| thumb.contains(*p))
         .map(|p| ((p.x - thumb.left()) / thumb.width()).clamp(0.0, 1.0));
-    let tiles = workers::FILMSTRIP_FRAMES;
-    let frame_tile = match hover_x {
-        Some(t) => ((t * tiles as f32) as usize).min(tiles - 1),
-        None => 0,
-    };
-
-    if let Some(tex) = app.thumbnails.get(&id) {
-        let sheet = tex.size_vec2();
-        let tile_size = egui::vec2(sheet.x / tiles as f32, sheet.y);
-        let scale = (thumb.width() / tile_size.x).min(thumb.height() / tile_size.y);
-        let draw = Rect::from_center_size(thumb.center(), tile_size * scale);
-        let u0 = frame_tile as f32 / tiles as f32;
-        let u1 = (frame_tile + 1) as f32 / tiles as f32;
+    if let Some(t) = app.thumb(id) {
+        // The tile under the pointer. A sheet has one per pixel of the
+        // thumbnail's width, so a single pixel of movement lands on a
+        // different frame; a clip still showing only its poster has one tile
+        // and simply shows it.
+        let frame_tile = match hover_x {
+            Some(x) => ((x * t.tiles as f32) as usize).min(t.tiles - 1),
+            None => t.tiles / 2,
+        };
+        let aspect = t.tile_aspect();
+        let mut size = egui::vec2(thumb.width(), thumb.width() / aspect);
+        if size.y > thumb.height() {
+            size = egui::vec2(thumb.height() * aspect, thumb.height());
+        }
         painter.image(
-            tex.id(),
-            draw,
-            Rect::from_min_max(egui::pos2(u0, 0.0), egui::pos2(u1, 1.0)),
+            t.tex.id(),
+            Rect::from_center_size(thumb.center(), size),
+            t.uv(frame_tile),
             egui::Color32::WHITE,
         );
     }
@@ -379,18 +442,11 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         );
     }
     if response.clicked() {
+        // Opens at the start, not at the frame under the pointer. Skimming is
+        // for finding the clip you want; once you have picked it you want to
+        // watch it, and landing at whatever moment the pointer happened to be
+        // over means scrubbing backwards first every time.
         app.select_bin_clip(id);
-        // Clicking the picture opens the clip *at the frame under the
-        // pointer*, so skimming to a moment and landing on it is one gesture.
-        if let Some(t) = response
-            .interact_pointer_pos()
-            .filter(|p| thumb.contains(*p))
-            .map(|p| ((p.x - thumb.left()) / thumb.width()).clamp(0.0, 1.0))
-        {
-            app.focus = Focus::Source;
-            let last = (duration_frames - 1).max(0);
-            app.set_position((t * last as f32).round() as i64);
-        }
     }
     if response.double_clicked() {
         if missing {

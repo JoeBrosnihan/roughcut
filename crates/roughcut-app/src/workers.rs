@@ -25,21 +25,64 @@ pub const THUMB_WIDTH: u32 = 96;
 
 /// Frames sampled across each clip for hover-scrubbing in the bin.
 ///
-/// They are baked into one horizontal sheet per clip rather than fetched as
-/// the pointer moves. Hovering then costs a UV offset and nothing else — no
-/// decode, no I/O, no work while the pointer is still.
-pub const FILMSTRIP_FRAMES: usize = 12;
+/// One per pixel of the tile's width, so moving the pointer a single pixel
+/// always lands on a frame that was really extracted. Fewer and the picture
+/// visibly steps as you skim; more would sample finer than the screen can
+/// show.
+///
+/// They are baked into one sheet per clip rather than fetched as the pointer
+/// moves. Hovering then costs a UV offset and nothing else — no decode, no
+/// I/O, no work at all while the pointer is still.
+pub const SCRUB_TILES: usize = 112;
+
+/// Tiles per row in a sheet. A single row of 112 would be 10752 pixels wide,
+/// near enough the maximum texture size on older hardware to be worth
+/// avoiding; a grid keeps it to 1344x432.
+const SHEET_COLS: usize = 14;
+
+/// Columns and rows a sheet of `tiles` is laid out as.
+pub fn grid_for(tiles: usize) -> (usize, usize) {
+    if tiles <= 1 {
+        return (1, 1);
+    }
+    let cols = SHEET_COLS.min(tiles);
+    (cols, tiles.div_ceil(cols))
+}
+
+/// How many tiles are asked of ffmpeg at once.
+///
+/// Every tile is a separate `-i`, so a whole sheet in one command would build
+/// a command line long enough to be a problem on Windows. Batching also means
+/// one impossible seek costs a batch rather than the entire sheet.
+const BATCH: usize = 16;
+
+/// Work the user is waiting on goes first.
+///
+/// The bin is unusable until its pictures appear, so every clip gets its one
+/// poster frame before any clip gets the 112-frame sheet that only matters
+/// once you hover it. Without this a large bin spends minutes building scrub
+/// data for the first clip while the fortieth is still a grey rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    /// Runs on a reserved thread, so it starts even when every general worker
+    /// is midway through a transcode.
+    High,
+    Low,
+}
 
 #[derive(Debug, Clone)]
 pub enum Job {
     Probe {
         path: PathBuf,
     },
-    Filmstrip {
+    /// Tiles for one clip: `tiles == 1` is the poster the bin shows at rest,
+    /// anything more is the sheet hover-scrubbing indexes into.
+    Thumbs {
         clip_id: ClipId,
         path: PathBuf,
         duration_frames: i64,
         fps: Rational,
+        tiles: usize,
         /// Where finished sheets are kept between sessions. `None` disables
         /// caching, which only happens if there is nowhere to write.
         cache_dir: Option<PathBuf>,
@@ -59,20 +102,25 @@ pub enum Job {
     },
 }
 
-/// `FILMSTRIP_FRAMES` tiles laid out left to right in one image. Kept
-/// UI-framework-free so workers never touch egui.
-pub struct Filmstrip {
-    /// Width of the whole sheet, i.e. one tile times `FILMSTRIP_FRAMES`.
+/// Tiles packed into one image, row-major. Kept UI-framework-free so workers
+/// never touch egui.
+pub struct Sheet {
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
+    pub cols: usize,
+    pub rows: usize,
+    /// Tiles actually filled. The last row may be short; spare cells stay
+    /// black and are never indexed.
+    pub tiles: usize,
 }
 
-impl std::fmt::Debug for Filmstrip {
+impl std::fmt::Debug for Sheet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Filmstrip")
+        f.debug_struct("Sheet")
             .field("width", &self.width)
             .field("height", &self.height)
+            .field("tiles", &self.tiles)
             .field("bytes", &self.rgba.len())
             .finish()
     }
@@ -84,9 +132,9 @@ pub enum JobResult {
         path: PathBuf,
         result: Result<MediaInfo>,
     },
-    Filmstrip {
+    Thumbs {
         clip_id: ClipId,
-        result: Result<Filmstrip>,
+        result: Result<Sheet>,
     },
     ProxyStarted {
         clip_id: ClipId,
@@ -102,9 +150,22 @@ pub enum JobResult {
 }
 
 struct Queue {
-    jobs: VecDeque<Job>,
+    high: VecDeque<Job>,
+    low: VecDeque<Job>,
     suspended: bool,
     shutdown: bool,
+}
+
+impl Job {
+    fn priority(&self) -> Priority {
+        match self {
+            // Probing gates import, and a rotation is something the user just
+            // asked for and is sitting there waiting on.
+            Job::Probe { .. } | Job::Rotate { .. } => Priority::High,
+            Job::Thumbs { tiles, .. } if *tiles <= 1 => Priority::High,
+            Job::Thumbs { .. } | Job::Proxy { .. } => Priority::Low,
+        }
+    }
 }
 
 struct Shared {
@@ -131,7 +192,8 @@ impl WorkerPool {
         let (tx, results) = crossbeam_channel::unbounded();
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
-                jobs: VecDeque::new(),
+                high: VecDeque::new(),
+                low: VecDeque::new(),
                 suspended: false,
                 shutdown: false,
             }),
@@ -141,14 +203,32 @@ impl WorkerPool {
             tools,
         });
 
-        let threads = (0..pool_size())
+        // One thread beyond the pool takes nothing but high-priority work.
+        //
+        // Priority alone is not enough: it decides what comes off the queue
+        // next, not who is free to take it. With every general worker part-way
+        // through a multi-second transcode, a rotation the user just asked for
+        // would sit there until one of them finished. This thread is asleep on
+        // a condvar essentially always, so reserving it costs nothing.
+        let threads = (0..pool_size() + 1)
             .map(|i| {
                 let shared = shared.clone();
+                let interactive = i == pool_size();
+                let name = if interactive {
+                    "roughcut-interactive".to_string()
+                } else {
+                    format!("roughcut-worker-{i}")
+                };
                 std::thread::Builder::new()
-                    .name(format!("roughcut-worker-{i}"))
+                    .name(name)
                     .spawn(move || {
-                        lower_thread_priority();
-                        worker_loop(shared);
+                        // The reserved thread stays at normal priority: it
+                        // exists to be responsive, and the OS should not
+                        // deprioritise the work someone is waiting on.
+                        if !interactive {
+                            lower_thread_priority();
+                        }
+                        worker_loop(shared, interactive);
                     })
                     .expect("cannot spawn worker thread")
             })
@@ -167,9 +247,15 @@ impl WorkerPool {
             if q.shutdown {
                 return;
             }
-            q.jobs.push_back(job);
+            match job.priority() {
+                Priority::High => q.high.push_back(job),
+                Priority::Low => q.low.push_back(job),
+            }
         }
-        self.shared.wake.notify_one();
+        // `notify_all`, not `notify_one`: the reserved thread ignores
+        // low-priority work, so waking exactly one sleeper risks waking the
+        // one that cannot take the job.
+        self.shared.wake.notify_all();
     }
 
     /// Stop handing out new work. In-flight jobs run to completion — an
@@ -195,7 +281,8 @@ impl WorkerPool {
     /// Drop everything not yet started, e.g. when a project is closed.
     pub fn clear_queue(&self) {
         let mut q = self.shared.queue.lock().unwrap();
-        q.jobs.clear();
+        q.high.clear();
+        q.low.clear();
     }
 }
 
@@ -204,7 +291,8 @@ impl Drop for WorkerPool {
         {
             let mut q = self.shared.queue.lock().unwrap();
             q.shutdown = true;
-            q.jobs.clear();
+            q.high.clear();
+            q.low.clear();
         }
         self.shared.wake.notify_all();
         for t in self.threads.drain(..) {
@@ -213,7 +301,7 @@ impl Drop for WorkerPool {
     }
 }
 
-fn worker_loop(shared: Arc<Shared>) {
+fn worker_loop(shared: Arc<Shared>, interactive: bool) {
     loop {
         // Block until there is work and we are not suspended. A condvar wait
         // is a real OS sleep: no timer, no wakeups, no CPU.
@@ -224,7 +312,14 @@ fn worker_loop(shared: Arc<Shared>) {
                     return;
                 }
                 if !q.suspended {
-                    if let Some(job) = q.jobs.pop_front() {
+                    // The reserved thread never touches the low queue, so it
+                    // is always free for the next thing the user asks for.
+                    let next = if interactive {
+                        q.high.pop_front()
+                    } else {
+                        q.high.pop_front().or_else(|| q.low.pop_front())
+                    };
+                    if let Some(job) = next {
                         break job;
                     }
                 }
@@ -252,20 +347,26 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             };
             JobResult::Probed { path, result }
         }
-        Job::Filmstrip {
+        Job::Thumbs {
             clip_id,
             path,
             duration_frames,
             fps,
+            tiles,
             cache_dir,
         } => {
             let result = match &shared.tools.ffmpeg {
-                Some(ffmpeg) => {
-                    make_filmstrip(ffmpeg, &path, duration_frames, fps, cache_dir.as_deref())
-                }
+                Some(ffmpeg) => make_sheet(
+                    ffmpeg,
+                    &path,
+                    duration_frames,
+                    fps,
+                    tiles,
+                    cache_dir.as_deref(),
+                ),
                 None => Err(anyhow::anyhow!("ffmpeg is not available")),
             };
-            JobResult::Filmstrip { clip_id, result }
+            JobResult::Thumbs { clip_id, result }
         }
         Job::Proxy {
             clip_id,
@@ -326,38 +427,33 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
 /// One frame, scaled down, straight out of ffmpeg as a PNG on stdout.
 /// The frame sampled for tile `i`: the centre of the slice it represents, so
 /// tile 0 is not frame 0 — the first frame of a shot is very often black.
-pub fn filmstrip_frame(tile: usize, duration_frames: i64) -> i64 {
+pub fn filmstrip_frame(tile: usize, duration_frames: i64, tiles: usize) -> i64 {
     let last = (duration_frames - 1).max(0);
-    let n = FILMSTRIP_FRAMES as i64;
+    let n = tiles.max(1) as i64;
     ((tile as i64 * 2 + 1) * last) / (n * 2)
 }
 
 /// Which tile best represents `frame`. The inverse of `filmstrip_frame`, used
 /// to paint timeline blocks with the picture at that point in the clip.
-pub fn tile_for_frame(frame: i64, duration_frames: i64) -> usize {
+pub fn tile_for_frame(frame: i64, duration_frames: i64, tiles: usize) -> usize {
+    let tiles = tiles.max(1);
     let last = (duration_frames - 1).max(1);
     let t = (frame.clamp(0, last) as f64) / last as f64;
-    ((t * FILMSTRIP_FRAMES as f64) as usize).min(FILMSTRIP_FRAMES - 1)
+    ((t * tiles as f64) as usize).min(tiles - 1)
 }
 
-/// Sample `FILMSTRIP_FRAMES` frames across the clip and lay them out in one
-/// horizontal sheet.
-///
-/// Each frame is a separate input-seek grab, which is near-instant regardless
-/// of how long the file is. A single ffmpeg call with an `fps` filter would be
-/// tidier but has to decode the whole file — minutes, for a long 4K interview.
 /// Identifies a cached sheet.
 ///
 /// Everything that would change the picture goes in: which file, the version
 /// of it on disk right now, and the shape of the sheet. A rotated or replaced
 /// source therefore misses rather than serving a stale strip, and no explicit
 /// invalidation is needed anywhere.
-fn cache_key(path: &std::path::Path, duration_frames: i64) -> String {
+fn cache_key(path: &std::path::Path, duration_frames: i64, tiles: usize) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut h);
     duration_frames.hash(&mut h);
-    FILMSTRIP_FRAMES.hash(&mut h);
+    tiles.hash(&mut h);
     THUMB_WIDTH.hash(&mut h);
     if let Ok(meta) = std::fs::metadata(path) {
         meta.len().hash(&mut h);
@@ -370,76 +466,134 @@ fn cache_key(path: &std::path::Path, duration_frames: i64) -> String {
     format!("{:016x}", h.finish())
 }
 
-fn read_cached(file: &std::path::Path) -> Option<Filmstrip> {
+fn read_cached(file: &std::path::Path, tiles: usize) -> Option<Sheet> {
     let img = image::open(file).ok()?.to_rgba8();
-    Some(Filmstrip {
+    let (cols, rows) = grid_for(tiles);
+    Some(Sheet {
         width: img.width() as usize,
         height: img.height() as usize,
         rgba: img.into_raw(),
+        cols,
+        rows,
+        tiles,
     })
 }
 
-/// One sheet of `FILMSTRIP_FRAMES` tiles for a clip.
+/// A clip's tiles, packed into one image.
 ///
 /// Kept on disk between sessions. Reopening a project used to re-extract every
 /// thumbnail from scratch, which on a large bin is minutes of ffmpeg before
-/// the pictures appear; now it is a file read.
-fn make_filmstrip(
+/// any picture appears; now it is a file read.
+fn make_sheet(
     ffmpeg: &std::path::Path,
     path: &std::path::Path,
     duration_frames: i64,
     fps: Rational,
+    tiles: usize,
     cache_dir: Option<&std::path::Path>,
-) -> Result<Filmstrip> {
-    let cache_file = cache_dir.map(|d| d.join(format!("{}.png", cache_key(path, duration_frames))));
+) -> Result<Sheet> {
+    let tiles = tiles.max(1);
+    let cache_file =
+        cache_dir.map(|d| d.join(format!("{}.png", cache_key(path, duration_frames, tiles))));
     if let Some(file) = &cache_file {
-        if let Some(hit) = read_cached(file) {
+        if let Some(hit) = read_cached(file, tiles) {
             return Ok(hit);
         }
     }
 
-    let frames: Vec<i64> = (0..FILMSTRIP_FRAMES)
-        .map(|i| filmstrip_frame(i, duration_frames))
+    let frames: Vec<i64> = (0..tiles)
+        .map(|i| filmstrip_frame(i, duration_frames, tiles))
         .collect();
 
-    // One ffmpeg for the whole sheet. Twelve separate launches per clip cost
-    // more in process startup alone than the decoding did.
-    let sheet = match grab_sheet(ffmpeg, path, &frames, fps) {
-        Ok(sheet) => sheet,
-        // Odd files exist — a seek that lands nowhere makes `hstack` fail, and
-        // it takes the whole sheet with it. Falling back frame by frame is
-        // slow but tolerates individual gaps, so a difficult clip still gets
-        // thumbnails rather than none.
-        Err(e) => {
-            log::debug!("single-pass filmstrip failed for {}: {e:#}", path.display());
-            stitch_individually(ffmpeg, path, &frames, fps)?
+    // Each batch is one ffmpeg run producing a horizontal strip; the strips
+    // are then cut up and packed into the grid. One launch per tile — which is
+    // what this used to do — costs more in process startup than the decoding.
+    let mut strips: Vec<(usize, image::RgbaImage)> = Vec::new();
+    for (b, chunk) in frames.chunks(BATCH).enumerate() {
+        match grab_strip(ffmpeg, path, chunk, fps) {
+            Ok(img) => strips.push((b * BATCH, img)),
+            // Odd files exist, and a seek that lands nowhere makes `hstack`
+            // fail for the whole batch. Falling back frame by frame is slow
+            // but tolerates individual gaps, so a difficult clip still gets
+            // thumbnails rather than none.
+            Err(e) => {
+                log::debug!("batch {b} of {} failed: {e:#}", path.display());
+                for (k, &f) in chunk.iter().enumerate() {
+                    if let Ok(img) = grab_frame(ffmpeg, path, f, fps) {
+                        strips.push((b * BATCH + k, img));
+                    }
+                }
+            }
         }
-    };
+    }
 
+    let sheet = pack(&strips, tiles)?;
     if let Some(file) = &cache_file {
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Err(e) = sheet.save(file) {
-            log::debug!("cannot cache filmstrip at {}: {e}", file.display());
+            log::debug!("cannot cache sheet at {}: {e}", file.display());
         }
     }
 
-    Ok(Filmstrip {
+    let (cols, rows) = grid_for(tiles);
+    Ok(Sheet {
         width: sheet.width() as usize,
         height: sheet.height() as usize,
         rgba: sheet.into_raw(),
+        cols,
+        rows,
+        tiles,
     })
 }
 
-/// Every tile in a single ffmpeg run: one fast input seek per frame, scaled
-/// and stacked side by side by the filter graph.
-fn grab_sheet(
+/// Cut the strips into tiles and lay them out row-major.
+///
+/// Each entry is a horizontal run of tiles starting at a known index, which is
+/// what both the batched and the frame-by-frame paths produce.
+fn pack(strips: &[(usize, image::RgbaImage)], tiles: usize) -> Result<image::RgbaImage> {
+    let (_, first) = strips
+        .first()
+        .context("ffmpeg produced no frames for this clip")?;
+    // Every tile in a strip is the same width by construction.
+    let n = (first.width() as usize / THUMB_WIDTH as usize).max(1);
+    let (tw, th) = ((first.width() / n as u32).max(1), first.height());
+
+    let (cols, rows) = grid_for(tiles);
+    let mut sheet = image::RgbaImage::new(tw * cols as u32, th * rows as u32);
+    for (base, img) in strips {
+        if img.height() != th {
+            continue;
+        }
+        let count = (img.width() / tw) as usize;
+        for k in 0..count {
+            let index = base + k;
+            if index >= tiles {
+                break;
+            }
+            let (dx, dy) = ((index % cols) as u32 * tw, (index / cols) as u32 * th);
+            for y in 0..th {
+                for x in 0..tw {
+                    sheet.put_pixel(dx + x, dy + y, *img.get_pixel(k as u32 * tw + x, y));
+                }
+            }
+        }
+    }
+    Ok(sheet)
+}
+
+/// One ffmpeg run: a fast input seek per frame, scaled and stacked side by
+/// side by the filter graph.
+fn grab_strip(
     ffmpeg: &std::path::Path,
     path: &std::path::Path,
     frames: &[i64],
     fps: Rational,
 ) -> Result<image::RgbaImage> {
+    if frames.len() == 1 {
+        return grab_frame(ffmpeg, path, frames[0], fps);
+    }
     let n = frames.len();
     let mut cmd = quiet_command(ffmpeg);
     cmd.args(["-v", "error"]);
@@ -474,53 +628,17 @@ fn grab_sheet(
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
     if !output.status.success() || output.stdout.is_empty() {
         bail!(
-            "ffmpeg produced no filmstrip: {}",
+            "ffmpeg produced no strip: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(
         image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png)
-            .context("cannot decode the filmstrip ffmpeg produced")?
+            .context("cannot decode the strip ffmpeg produced")?
             .to_rgba8(),
     )
 }
 
-/// The slow path: one ffmpeg per tile, tolerating any that fail.
-fn stitch_individually(
-    ffmpeg: &std::path::Path,
-    path: &std::path::Path,
-    frames: &[i64],
-    fps: Rational,
-) -> Result<image::RgbaImage> {
-    let tiles: Vec<Option<image::RgbaImage>> = frames
-        .iter()
-        .map(|&f| grab_frame(ffmpeg, path, f, fps).ok())
-        .collect();
-
-    let first = tiles
-        .iter()
-        .flatten()
-        .next()
-        .context("ffmpeg produced no frames for this clip")?;
-    let (tw, th) = (first.width(), first.height());
-
-    // Anything that failed or came back an odd size is left black rather than
-    // shifting every later tile along.
-    let mut sheet = image::RgbaImage::new(tw * frames.len() as u32, th);
-    for (i, tile) in tiles.iter().enumerate() {
-        let Some(img) = tile else { continue };
-        if img.width() != tw || img.height() != th {
-            continue;
-        }
-        let x0 = i as u32 * tw;
-        for y in 0..th {
-            for x in 0..tw {
-                sheet.put_pixel(x0 + x, y, *img.get_pixel(x, y));
-            }
-        }
-    }
-    Ok(sheet)
-}
 
 fn grab_frame(
     ffmpeg: &std::path::Path,
@@ -623,35 +741,82 @@ mod tests {
     #[test]
     fn filmstrip_tiles_span_the_clip_in_order() {
         let last = 299;
-        let frames: Vec<i64> = (0..FILMSTRIP_FRAMES)
-            .map(|i| filmstrip_frame(i, 300))
+        let frames: Vec<i64> = (0..SCRUB_TILES)
+            .map(|i| filmstrip_frame(i, 300, SCRUB_TILES))
             .collect();
-        assert_eq!(frames.len(), FILMSTRIP_FRAMES);
+        assert_eq!(frames.len(), SCRUB_TILES);
         // Never the very first frame, which is usually black.
         assert!(frames[0] > 0, "tile 0 sampled frame {}", frames[0]);
-        assert!(frames.windows(2).all(|w| w[0] < w[1]), "{frames:?}");
+        assert!(frames.windows(2).all(|w| w[0] <= w[1]), "{frames:?}");
         assert!(*frames.last().unwrap() <= last);
     }
 
     #[test]
     fn tile_lookup_inverts_tile_sampling() {
-        // Every tile's own sample frame must map back to that tile.
-        for i in 0..FILMSTRIP_FRAMES {
-            let f = filmstrip_frame(i, 300);
-            assert_eq!(tile_for_frame(f, 300), i, "tile {i} sampled frame {f}");
+        // Every tile's own sample frame must map back to that tile, at any
+        // sheet size — the poster has one tile, a scrub sheet has 112.
+        for tiles in [1, 12, SCRUB_TILES] {
+            // Long enough that each tile gets a distinct frame.
+            let dur = 4000;
+            for i in 0..tiles {
+                let f = filmstrip_frame(i, dur, tiles);
+                assert_eq!(tile_for_frame(f, dur, tiles), i, "tiles {tiles}, tile {i}");
+            }
+            // Ends clamp rather than running off either side.
+            assert_eq!(tile_for_frame(-5, dur, tiles), 0);
+            assert_eq!(tile_for_frame(99_999, dur, tiles), tiles - 1);
         }
-        // Ends clamp rather than running off either side.
-        assert_eq!(tile_for_frame(-5, 300), 0);
-        assert_eq!(tile_for_frame(9999, 300), FILMSTRIP_FRAMES - 1);
     }
 
     #[test]
     fn filmstrip_handles_degenerate_clips() {
         // A one-frame clip: every tile is frame 0, and nothing panics.
-        for i in 0..FILMSTRIP_FRAMES {
-            assert_eq!(filmstrip_frame(i, 1), 0);
-            assert_eq!(filmstrip_frame(i, 0), 0);
+        for i in 0..SCRUB_TILES {
+            assert_eq!(filmstrip_frame(i, 1, SCRUB_TILES), 0);
+            assert_eq!(filmstrip_frame(i, 0, SCRUB_TILES), 0);
         }
+        assert_eq!(tile_for_frame(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn a_sheet_grid_holds_every_tile_and_stays_squarish() {
+        for tiles in [1usize, 2, 12, SCRUB_TILES] {
+            let (cols, rows) = grid_for(tiles);
+            assert!(cols * rows >= tiles, "{tiles} does not fit {cols}x{rows}");
+            assert!(cols <= SHEET_COLS.max(1));
+            // A single row of 112 tiles would be 10752px wide, which is what
+            // the grid exists to avoid.
+            assert!(cols * THUMB_WIDTH as usize <= 4096);
+        }
+        assert_eq!(grid_for(1), (1, 1));
+    }
+
+    #[test]
+    fn the_poster_outranks_every_sheet() {
+        // The bin is unusable until its pictures appear, so a one-tile poster
+        // must never queue behind another clip's 112-tile sheet.
+        let poster = Job::Thumbs {
+            clip_id: ClipId::new(),
+            path: PathBuf::from("a.mp4"),
+            duration_frames: 100,
+            fps: Rational::new(30, 1),
+            tiles: 1,
+            cache_dir: None,
+        };
+        let sheet = Job::Thumbs {
+            clip_id: ClipId::new(),
+            path: PathBuf::from("a.mp4"),
+            duration_frames: 100,
+            fps: Rational::new(30, 1),
+            tiles: SCRUB_TILES,
+            cache_dir: None,
+        };
+        assert_eq!(poster.priority(), Priority::High);
+        assert_eq!(sheet.priority(), Priority::Low);
+        assert_eq!(
+            Job::Probe { path: PathBuf::from("a.mp4") }.priority(),
+            Priority::High
+        );
     }
 
     #[test]

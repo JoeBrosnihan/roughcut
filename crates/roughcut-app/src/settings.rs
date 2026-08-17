@@ -17,12 +17,19 @@ pub struct Settings {
     pub mpv_path: Option<PathBuf>,
     pub volume: f64,
     pub last_project_dir: Option<PathBuf>,
+    /// Projects opened or saved, most recent first. Capped at
+    /// [`MAX_RECENT`] — a list long enough to need scrolling is a file
+    /// dialog with extra steps.
+    pub recent_projects: Vec<PathBuf>,
     pub last_import_dir: Option<PathBuf>,
     /// Where the window was last time, so it opens where you left it instead
     /// of at a fixed size every launch. Windows does not remember this for an
     /// application; applications remember it for themselves.
     pub window: Option<WindowGeometry>,
 }
+
+/// How many projects the recents list keeps.
+pub const MAX_RECENT: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
@@ -61,9 +68,19 @@ impl Default for Settings {
             mpv_path: None,
             volume: 80.0,
             last_project_dir: None,
+            recent_projects: Vec::new(),
             last_import_dir: None,
             window: None,
         }
+    }
+}
+
+fn recent_key(path: &Path) -> String {
+    let s = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s
     }
 }
 
@@ -160,6 +177,24 @@ impl Settings {
     }
 
     /// Where proxies for `project_path` should live.
+    /// Put `path` at the top of the recents list.
+    ///
+    /// Case-insensitive de-duplication on Windows, where `C:\A.roughcut` and
+    /// `c:.roughcut` are the same file and listing both would be nonsense.
+    pub fn remember_recent(&mut self, path: &Path) {
+        let key = recent_key(path);
+        self.recent_projects.retain(|p| recent_key(p) != key);
+        self.recent_projects.insert(0, path.to_path_buf());
+        self.recent_projects.truncate(MAX_RECENT);
+    }
+
+    /// Drop a project from the list — used when opening one fails, since a
+    /// path that no longer resolves is not worth offering again.
+    pub fn forget_recent(&mut self, path: &Path) {
+        let key = recent_key(path);
+        self.recent_projects.retain(|p| recent_key(p) != key);
+    }
+
     pub fn resolve_proxy_dir(&self, project_path: Option<&Path>) -> Option<PathBuf> {
         self.proxy_dir.clone().or_else(|| {
             roughcut_core::project_io::default_proxy_dir(project_path)

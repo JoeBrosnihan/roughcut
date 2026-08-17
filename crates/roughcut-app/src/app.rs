@@ -34,6 +34,44 @@ pub enum Focus {
     Timeline,
 }
 
+/// A texture of tiles, plus how to index it.
+pub struct Thumb {
+    pub tex: egui::TextureHandle,
+    pub cols: usize,
+    pub rows: usize,
+    pub tiles: usize,
+    /// Value of `sheet_clock` when this was last drawn.
+    last_seen: std::cell::Cell<u64>,
+}
+
+impl Thumb {
+    /// The sub-rectangle of the texture holding `tile`, in UV space.
+    pub fn uv(&self, tile: usize) -> egui::Rect {
+        let tile = tile.min(self.tiles.saturating_sub(1));
+        let (cw, ch) = (1.0 / self.cols as f32, 1.0 / self.rows as f32);
+        let (cx, cy) = ((tile % self.cols) as f32, (tile / self.cols) as f32);
+        egui::Rect::from_min_size(
+            egui::pos2(cx * cw, cy * ch),
+            egui::vec2(cw, ch),
+        )
+    }
+
+    /// Aspect ratio of one tile, needed to letterbox it correctly.
+    pub fn tile_aspect(&self) -> f32 {
+        let size = self.tex.size_vec2();
+        let (tw, th) = (size.x / self.cols as f32, size.y / self.rows as f32);
+        if th > 0.0 {
+            tw / th
+        } else {
+            16.0 / 9.0
+        }
+    }
+
+    pub fn touch(&self, clock: u64) {
+        self.last_seen.set(clock);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
     Info,
@@ -115,8 +153,17 @@ pub struct RoughcutApp {
     import_order: Vec<PathBuf>,
     probe_results: HashMap<PathBuf, Result<MediaInfo, String>>,
 
-    pub thumbnails: HashMap<ClipId, egui::TextureHandle>,
+    /// One frame per clip, shown in the bin and on timeline blocks at rest.
+    /// Tiny — a few tens of kilobytes each — so every clip keeps one.
+    pub posters: HashMap<ClipId, Thumb>,
+    /// The dense sheets hover-scrubbing indexes into. Each is a couple of
+    /// megabytes, so only the most recently used are kept resident.
+    pub sheets: HashMap<ClipId, Thumb>,
+    /// Bumped every frame, and stamped on a sheet whenever it is drawn, so
+    /// the least recently *seen* sheet can be identified for eviction.
+    sheet_clock: u64,
     thumb_requested: HashSet<ClipId>,
+    sheet_requested: HashSet<ClipId>,
     pub proxy_state: HashMap<ClipId, ProxyState>,
     /// Clips whose file is being rewritten on disk right now. Rotating twice
     /// at once would have two ffmpeg processes racing for the same path.
@@ -189,8 +236,11 @@ impl RoughcutApp {
             fullscreen_pending: false,
             import_order: Vec::new(),
             probe_results: HashMap::new(),
-            thumbnails: HashMap::new(),
+            posters: HashMap::new(),
+            sheets: HashMap::new(),
+            sheet_clock: 0,
             thumb_requested: HashSet::new(),
+            sheet_requested: HashSet::new(),
             proxy_state: HashMap::new(),
             rotating: HashSet::new(),
             status: None,
@@ -225,6 +275,38 @@ impl RoughcutApp {
 
     pub fn fps(&self) -> Rational {
         self.project.fps()
+    }
+
+    /// The best tiles available for a clip: its scrub sheet if one is
+    /// resident, otherwise the single poster frame. Drawing through this is
+    /// what keeps the sheet's place in the eviction order up to date.
+    pub fn thumb(&self, id: ClipId) -> Option<&Thumb> {
+        let t = self.sheets.get(&id).or_else(|| self.posters.get(&id))?;
+        t.touch(self.sheet_clock);
+        Some(t)
+    }
+
+    /// Drop the sheets nobody has looked at recently.
+    ///
+    /// A hundred clips of 112 tiles is a quarter of a gigabyte, well past the
+    /// budget, and almost all of it is for clips scrolled out of sight. The
+    /// posters stay, so every clip still shows a picture; only the ability to
+    /// scrub a long-untouched clip is given up, and it comes back from the
+    /// disk cache the moment it is wanted.
+    fn evict_stale_sheets(&mut self) {
+        const MAX_RESIDENT: usize = 48;
+        while self.sheets.len() > MAX_RESIDENT {
+            let Some(oldest) = self
+                .sheets
+                .iter()
+                .min_by_key(|(_, t)| t.last_seen.get())
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            self.sheets.remove(&oldest);
+            self.sheet_requested.remove(&oldest);
+        }
     }
 
     pub fn set_status(&mut self, text: impl Into<String>, kind: StatusKind) {
@@ -539,7 +621,17 @@ impl RoughcutApp {
 
     pub fn dispatch(&mut self, action: Action) {
         match action {
-            Action::TogglePlay => self.monitor.toggle_play(),
+            Action::TogglePlay => {
+                // Play from the top when there is nothing left to play.
+                // Otherwise the key does nothing at all at the end of a clip,
+                // which reads as the application having stopped responding.
+                if matches!(self.monitor.transport, Transport::Paused)
+                    && self.position() >= self.position_max()
+                {
+                    self.set_position(0);
+                }
+                self.monitor.toggle_play();
+            }
             Action::ShuttleForward => self.monitor.shuttle_forward(),
             Action::ShuttleReverse => self.monitor.shuttle_reverse(),
             Action::Pause => self.monitor.pause(),
@@ -806,7 +898,9 @@ impl RoughcutApp {
             .map(|c| c.id)
         };
         if self.edit(|p| p.remove_clip(id)) {
-            self.thumbnails.remove(&id);
+            self.posters.remove(&id);
+            self.sheets.remove(&id);
+            self.sheet_requested.remove(&id);
             self.thumb_requested.remove(&id);
             self.proxy_state.remove(&id);
             self.selected_clip = next;
@@ -1083,7 +1177,9 @@ impl RoughcutApp {
                 c.proxy_path = None;
             }
         }
-        self.thumbnails.remove(&id);
+        self.posters.remove(&id);
+            self.sheets.remove(&id);
+            self.sheet_requested.remove(&id);
         self.thumb_requested.remove(&id);
         self.proxy_state.remove(&id);
         self.request_thumbnail(id);
@@ -1171,8 +1267,11 @@ impl RoughcutApp {
         self.workers.clear_queue();
         self.import_order.clear();
         self.probe_results.clear();
-        self.thumbnails.clear();
+        self.posters.clear();
+                self.sheets.clear();
+                self.sheet_requested.clear();
         self.thumb_requested.clear();
+                self.sheet_requested.clear();
         self.proxy_state.clear();
         self.missing_media.clear();
         self.monitor.clear();
@@ -1210,6 +1309,16 @@ impl RoughcutApp {
         self.open_project_at(&path);
     }
 
+    pub fn open_recent(&mut self, path: &Path) {
+        let path = path.to_path_buf();
+        self.open_project_at(&path);
+    }
+
+    pub fn clear_recents(&mut self) {
+        self.settings.recent_projects.clear();
+        self.settings.save();
+    }
+
     fn open_project_at(&mut self, path: &Path) {
         let path = path.to_path_buf();
         match project_io::load(&path) {
@@ -1223,8 +1332,11 @@ impl RoughcutApp {
                 self.history.clear();
                 self.project_path = Some(path.clone());
                 self.dirty = false;
-                self.thumbnails.clear();
+                self.posters.clear();
+                self.sheets.clear();
+                self.sheet_requested.clear();
                 self.thumb_requested.clear();
+                self.sheet_requested.clear();
                 self.proxy_state.clear();
                 self.workers.clear_queue();
                 self.monitor.clear();
@@ -1236,8 +1348,9 @@ impl RoughcutApp {
                 self.missing_media = project_io::missing_media(&self.project);
                 if let Some(dir) = path.parent() {
                     self.settings.last_project_dir = Some(dir.to_path_buf());
-                    self.settings.save();
                 }
+                self.settings.remember_recent(&path);
+                self.settings.save();
                 if self.missing_media.is_empty() {
                     self.set_status(format!("opened {}", path.display()), StatusKind::Info);
                 } else {
@@ -1247,7 +1360,12 @@ impl RoughcutApp {
                     );
                 }
             }
-            Err(e) => self.set_status(format!("{e:#}"), StatusKind::Error),
+            Err(e) => {
+                // A path that no longer loads is not worth offering again.
+                self.settings.forget_recent(&path);
+                self.settings.save();
+                self.set_status(format!("{e:#}"), StatusKind::Error);
+            }
         }
     }
 
@@ -1269,8 +1387,9 @@ impl RoughcutApp {
             Ok(()) => {
                 if let Some(dir) = path.parent() {
                     self.settings.last_project_dir = Some(dir.to_path_buf());
-                    self.settings.save();
                 }
+                self.settings.remember_recent(&path);
+                self.settings.save();
                 self.project_path = Some(path.clone());
                 self.dirty = false;
                 // The work is in a real file now, so the snapshot no longer
@@ -1331,7 +1450,9 @@ impl RoughcutApp {
         };
         if self.edit(|p| project_io::relink(p, id, &path)) {
             self.missing_media.retain(|(mid, _)| *mid != id);
-            self.thumbnails.remove(&id);
+            self.posters.remove(&id);
+            self.sheets.remove(&id);
+            self.sheet_requested.remove(&id);
             self.thumb_requested.remove(&id);
             self.set_status(format!("relinked {name}"), StatusKind::Info);
         }
@@ -1381,26 +1502,40 @@ impl RoughcutApp {
                         .insert(path, result.map_err(|e| format!("{e:#}")));
                     self.drain_probes();
                 }
-                JobResult::Filmstrip { clip_id, result } => match result {
-                    Ok(strip) => {
+                JobResult::Thumbs { clip_id, result } => match result {
+                    Ok(sheet) => {
+                        let poster = sheet.tiles <= 1;
                         let image = egui::ColorImage::from_rgba_unmultiplied(
-                            [strip.width, strip.height],
-                            &strip.rgba,
+                            [sheet.width, sheet.height],
+                            &sheet.rgba,
                         );
                         log::debug!(
-                            "filmstrip {clip_id}: {}x{} ({} KiB)",
-                            strip.width,
-                            strip.height,
-                            strip.rgba.len() / 1024
+                            "sheet {clip_id}: {}x{}, {} tiles ({} KiB)",
+                            sheet.width,
+                            sheet.height,
+                            sheet.tiles,
+                            sheet.rgba.len() / 1024
                         );
                         let handle = ctx.load_texture(
-                            format!("strip-{clip_id}"),
+                            format!("tiles-{clip_id}-{}", sheet.tiles),
                             image,
                             egui::TextureOptions::LINEAR,
                         );
-                        self.thumbnails.insert(clip_id, handle);
+                        let thumb = Thumb {
+                            tex: handle,
+                            cols: sheet.cols,
+                            rows: sheet.rows,
+                            tiles: sheet.tiles,
+                            last_seen: std::cell::Cell::new(self.sheet_clock),
+                        };
+                        if poster {
+                            self.posters.insert(clip_id, thumb);
+                        } else {
+                            self.sheets.insert(clip_id, thumb);
+                            self.evict_stale_sheets();
+                        }
                     }
-                    Err(e) => log::warn!("filmstrip for {clip_id}: {e:#}"),
+                    Err(e) => log::warn!("tiles for {clip_id}: {e:#}"),
                 },
                 JobResult::ProxyStarted { clip_id } => {
                     self.proxy_state.insert(clip_id, ProxyState::Running);
@@ -1527,7 +1662,28 @@ impl RoughcutApp {
     }
 
     fn request_thumbnail(&mut self, id: ClipId) {
-        if self.thumbnails.contains_key(&id) || !self.thumb_requested.insert(id) {
+        self.request_tiles(id, 1);
+    }
+
+    /// Ask for the dense sheet that makes a clip scrubbable.
+    ///
+    /// Called when a tile comes into view rather than at import, so a bin of
+    /// two hundred clips only ever builds sheets for the ones looked at.
+    pub fn request_scrub_sheet(&mut self, id: ClipId) {
+        if self.sheets.contains_key(&id) {
+            return;
+        }
+        self.request_tiles(id, crate::workers::SCRUB_TILES);
+    }
+
+    fn request_tiles(&mut self, id: ClipId, tiles: usize) {
+        let poster = tiles <= 1;
+        let already = if poster {
+            self.posters.contains_key(&id) || !self.thumb_requested.insert(id)
+        } else {
+            self.sheets.contains_key(&id) || !self.sheet_requested.insert(id)
+        };
+        if already {
             return;
         }
         let Some(clip) = self.project.clip(id) else {
@@ -1536,7 +1692,7 @@ impl RoughcutApp {
         if !self.tools.has_ffmpeg() {
             return;
         }
-        self.workers.submit(Job::Filmstrip {
+        self.workers.submit(Job::Thumbs {
             clip_id: id,
             // The proxy when there is one: it is 540p, so every seek and
             // decode is a fraction of the cost of the same work on the
@@ -1544,6 +1700,7 @@ impl RoughcutApp {
             path: clip.playback_path().to_path_buf(),
             duration_frames: clip.duration_frames,
             fps: self.project.fps(),
+            tiles,
             cache_dir: crate::settings::thumb_cache_dir(),
         });
     }
@@ -1553,7 +1710,7 @@ impl RoughcutApp {
             .project
             .clips
             .iter()
-            .filter(|c| !self.thumbnails.contains_key(&c.id))
+            .filter(|c| !self.posters.contains_key(&c.id))
             .map(|c| c.id)
             .collect();
         for id in ids {
@@ -1583,6 +1740,7 @@ impl eframe::App for RoughcutApp {
         // stop responding to keys. Nothing here needs widget focus, so it is
         // surrendered every pass.
         ctx.memory_mut(|m| m.stop_text_input());
+        self.sheet_clock = self.sheet_clock.wrapping_add(1);
         self.remember_window_geometry(ctx);
 
         // Background work stops while the window is not focused (§3).
