@@ -41,6 +41,9 @@ act on whichever region currently has focus; press `Tab` to switch.
 
 | Key | Action | Scope |
 | --- | --- | --- |
+| `Ctrl+C` | Copy the clip under the playhead | Timeline |
+| `Ctrl+X` | Cut it: copy, then close the gap | Timeline |
+| `Ctrl+V` | Paste at the playhead, rippling the rest | Timeline |
 | `S` | Split at the playhead | Timeline |
 | `X  or  Delete` | Ripple delete, closing the gap | Timeline |
 | `[` | Trim the head of the clip to the playhead | Timeline |

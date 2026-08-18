@@ -15,7 +15,7 @@ use crate::{keys, theme, ui};
 
 use roughcut_core::import::{add_clip, remeasure, ImportOutcome};
 use roughcut_core::mlt::{self, ExportOptions};
-use roughcut_core::model::{ClipId, Project};
+use roughcut_core::model::{ClipId, Project, TimelineItem};
 use roughcut_core::probe::MediaInfo;
 use roughcut_core::project_io;
 use roughcut_core::rotate::Turn;
@@ -134,6 +134,10 @@ pub struct RoughcutApp {
     /// Set when the playhead crosses a cut, so the next media sync forces mpv
     /// to the new position instead of letting it keep playing where it was.
     force_media_jump: bool,
+    /// A copied range, waiting to be pasted. Roughcut's own, not the system
+    /// clipboard: what is being copied is a reference to part of a file, which
+    /// means nothing outside this application.
+    clipboard: Option<TimelineItem>,
     /// The timeline written out for mpv, and the cut list it describes. The
     /// signature is in the file name so that editing the timeline yields a
     /// path mpv has not seen — rewriting one path in place would leave it
@@ -237,6 +241,7 @@ impl RoughcutApp {
             scrubbing: false,
             mark_drag: None,
             force_media_jump: false,
+            clipboard: None,
             edl: None,
             fullscreen: false,
             fullscreen_pending: false,
@@ -673,6 +678,9 @@ impl RoughcutApp {
             Action::Append => self.append_marked(),
             Action::Insert => self.insert_marked(),
 
+            Action::Copy => self.copy_selection(false),
+            Action::Cut => self.copy_selection(true),
+            Action::Paste => self.paste(),
             Action::Split => self.split(),
             // Delete removes whatever is in the region you are looking at.
             Action::RippleDelete => match self.focus {
@@ -850,6 +858,83 @@ impl RoughcutApp {
         self.selected_item.or_else(|| {
             timeline::item_at(&self.project.timeline, self.playhead).map(|(i, _)| i)
         })
+    }
+
+    /// Copy what is under the playhead, optionally lifting it out.
+    ///
+    /// Works from either region, because both have an obvious answer to "what
+    /// is selected": on the timeline it is the cut under the playhead, and in
+    /// the bin it is the marked range — the same range `A` would append. Only
+    /// the timeline can be cut, since there is nothing in the bin to remove.
+    fn copy_selection(&mut self, lift: bool) {
+        let item = match self.focus {
+            Focus::Timeline => self.target_item().map(|i| self.project.timeline[i]),
+            Focus::Source => self
+                .marked_range()
+                .map(|(clip_id, in_frame, out_frame)| TimelineItem {
+                    clip_id,
+                    in_frame,
+                    out_frame,
+                }),
+        };
+        let Some(item) = item else {
+            self.set_status(
+                match self.focus {
+                    Focus::Timeline => "no clip under the playhead",
+                    Focus::Source => "nothing marked to copy",
+                },
+                StatusKind::Warn,
+            );
+            return;
+        };
+        self.clipboard = Some(item);
+
+        let name = self
+            .project
+            .clip(item.clip_id)
+            .map(|c| c.file_name())
+            .unwrap_or_default();
+        let len = format_timecode(item.len(), self.project.fps());
+        if lift && self.focus == Focus::Timeline {
+            self.ripple_delete();
+            self.set_status(format!("cut {len} of {name}"), StatusKind::Info);
+        } else {
+            self.set_status(format!("copied {len} of {name}"), StatusKind::Info);
+        }
+    }
+
+    /// Drop the copied range in at the playhead, rippling everything after it.
+    ///
+    /// Always inserts rather than overwrites, which is the only behaviour an
+    /// assembly editor with one track can offer without silently destroying
+    /// something.
+    fn paste(&mut self) {
+        let Some(item) = self.clipboard else {
+            self.set_status("nothing copied yet", StatusKind::Warn);
+            return;
+        };
+        // The clip it refers to can have been removed from the bin since.
+        if self.project.clip(item.clip_id).is_none() {
+            self.clipboard = None;
+            self.set_status("the copied clip is no longer in the bin", StatusKind::Warn);
+            return;
+        }
+        self.focus = Focus::Timeline;
+        let at = self.playhead;
+        let mut landed = None;
+        let ok = self.edit(|p| {
+            landed = timeline::insert_at(p, at, item.clip_id, item.in_frame, item.out_frame);
+            landed.is_some()
+        });
+        if ok {
+            let at = landed.unwrap_or(at);
+            self.selected_item = timeline::item_at(&self.project.timeline, at).map(|(i, _)| i);
+            // Leave the playhead at the end of what was just pasted, so
+            // pasting twice lays two cuts down in order rather than on top of
+            // each other.
+            self.playhead =
+                (at + item.len()).min(timeline::last_frame(&self.project.timeline));
+        }
     }
 
     fn split(&mut self) {
