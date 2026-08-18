@@ -47,6 +47,9 @@ pub enum TimeFormat {
 pub struct ExportOptions {
     pub title: String,
     pub time_format: TimeFormat,
+    /// Overrides the profile the export would otherwise derive from the clips
+    /// used. Set by the export dialog; `None` means take the suggestion.
+    pub profile: Option<crate::model::Profile>,
 }
 
 impl Default for ExportOptions {
@@ -54,6 +57,7 @@ impl Default for ExportOptions {
         Self {
             title: "Roughcut".to_string(),
             time_format: TimeFormat::default(),
+            profile: None,
         }
     }
 }
@@ -66,7 +70,10 @@ impl Default for ExportOptions {
 /// and the project is expressed in it first. When the working rate already
 /// matches — the ordinary case — that conversion is the identity.
 pub fn to_xml(project: &Project, opts: &ExportOptions) -> Result<String> {
-    let target = crate::profile::for_export(project);
+    let target = opts
+        .profile
+        .clone()
+        .unwrap_or_else(|| crate::profile::for_export(project));
     let retimed;
     let project = if target == project.profile {
         project

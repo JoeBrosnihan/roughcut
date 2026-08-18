@@ -57,3 +57,14 @@ dialog lists is a meaningless anchor. See [timing.md](timing.md).
 Roughcut does. It is a display-matrix rewrite done as a stream copy — no
 re-encode, no generation loss, no change to frame count or rate — and it is the
 only fix that survives leaving the program. Requested by the user.
+
+**11. Roughcut renders MP4 as well as writing MLT.** The brief, and this
+README until now, said rendering was Shotcut's job. It still does none of the
+encoding itself: `melt` is MLT's own renderer, ships with Shotcut, and reads
+exactly the XML already being written, so the whole feature is one child
+process with a progress bar. Requested by the user.
+
+**12. The export profile is chosen in a dialog**, not silently. §9 fixed the
+profile at import. It is now suggested from the clips actually used and
+overridable at export, because footage off several phones has no single obvious
+answer. Requested by the user. See [timing.md](timing.md).

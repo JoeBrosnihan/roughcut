@@ -6,9 +6,9 @@ Point Roughcut at a folder of video, skim it, mark the good bits, and build an
 ordered sequence. Export a `.mlt` project that Shotcut opens with every cut
 exactly where you put it.
 
-It is deliberately small: no effects, transitions, audio mixing, titles, second
-video track, or rendering. Those are Shotcut's job — this is the part before
-them, which is mostly watching and choosing.
+It is deliberately small: no effects, transitions, audio mixing, titles, or a
+second video track. Those are Shotcut's job — this is the part before them,
+which is mostly watching and choosing.
 
 ## What you need
 
@@ -29,14 +29,14 @@ Drop files on the window, or press `Ctrl+I`. The whole loop is three keys:
 
 Then repeat. `Space` plays, `←` `→` step a frame, `Tab` moves between the source
 and the timeline. `S` splits and `X` deletes and closes the gap — Shotcut's keys.
-Hover a thumbnail to skim that clip; click to open it at that moment. Drag clips
-onto the timeline, or along it to reorder; drag the ruler above them to scrub.
+Hover a thumbnail to skim it; middle-click to flag one as good. Drag clips onto
+the timeline, or along it to reorder; drag the ruler above them to scrub.
 Right-click a clip to rotate one that came off a phone sideways.
 **Press `?` for the full keyboard map**, or read [KEYS.md](KEYS.md).
 
-`Ctrl+E` exports a `.mlt`, sized and timed from the clips you used. Open it in
-Shotcut and finish there; the trip is one-way, so treat it as a handoff. Your
-work saves itself continuously, and is offered back after a crash.
+`Ctrl+E` exports, sized and timed from the clips you used: a `.mlt` to finish
+in Shotcut, or an MP4 straight out. Your work saves itself continuously, and is
+offered back after a crash.
 
 ## Building it, or changing it
 

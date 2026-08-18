@@ -73,6 +73,57 @@ impl Thumb {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// A project Shotcut opens, referring to the original files. Instant.
+    Mlt,
+    /// A finished video, encoded by melt. Minutes.
+    Mp4,
+}
+
+/// What the export dialog is currently set to.
+///
+/// Initialised from the profile suggested by the clips actually used, and
+/// entirely overridable — the suggestion is a starting point, not a decision.
+#[derive(Debug, Clone)]
+pub struct ExportPlan {
+    pub format: ExportFormat,
+    pub width: u32,
+    pub height: u32,
+    pub fps: Rational,
+    /// The suggestion, kept so the dialog can offer it back after fiddling.
+    pub suggested: roughcut_core::Profile,
+}
+
+impl ExportPlan {
+    /// The profile these choices describe, keeping the picture properties of
+    /// the suggestion — nobody wants to choose a colourspace.
+    pub fn profile(&self) -> roughcut_core::Profile {
+        roughcut_core::Profile {
+            frame_rate_num: self.fps.num,
+            frame_rate_den: self.fps.den,
+            width: self.width.max(2),
+            height: self.height.max(2),
+            ..self.suggested.clone()
+        }
+    }
+}
+
+pub struct RenderState {
+    pub out: PathBuf,
+    pub total: i64,
+    pub frame: i64,
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    rx: crossbeam_channel::Receiver<RenderMsg>,
+    /// The MLT handed to melt, removed once it is finished with.
+    scratch: PathBuf,
+}
+
+enum RenderMsg {
+    Progress(i64),
+    Done(Result<(), String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusKind {
     Info,
     Warn,
@@ -138,6 +189,11 @@ pub struct RoughcutApp {
     /// clipboard: what is being copied is a reference to part of a file, which
     /// means nothing outside this application.
     clipboard: Option<TimelineItem>,
+    /// The export dialog's pending choices, while it is open.
+    pub export_plan: Option<ExportPlan>,
+    /// A render in flight. One at a time: it is a foreground operation with a
+    /// progress bar, not background work.
+    pub render: Option<RenderState>,
     /// The timeline written out for mpv, and the cut list it describes. The
     /// signature is in the file name so that editing the timeline yields a
     /// path mpv has not seen — rewriting one path in place would leave it
@@ -242,6 +298,8 @@ impl RoughcutApp {
             mark_drag: None,
             force_media_jump: false,
             clipboard: None,
+            export_plan: None,
+            render: None,
             edl: None,
             fullscreen: false,
             fullscreen_pending: false,
@@ -1139,7 +1197,11 @@ impl RoughcutApp {
     /// True while a modal is up. Key dispatch pauses so a stray `A` cannot
     /// append to a project the user is in the middle of deciding about.
     pub fn modal_open(&self) -> bool {
-        self.recovery.is_some() || self.show_missing_tool || !self.missing_media.is_empty()
+        self.recovery.is_some()
+            || self.show_missing_tool
+            || !self.missing_media.is_empty()
+            || self.export_plan.is_some()
+            || self.render.is_some()
     }
 
     pub fn clamp_selection(&mut self) {
@@ -1526,39 +1588,181 @@ impl RoughcutApp {
         }
     }
 
+    /// Open the export dialog, set to what the used clips suggest.
     fn export_dialog(&mut self) {
         if self.project.timeline.is_empty() {
             self.set_status("the timeline is empty — nothing to export", StatusKind::Warn);
             return;
         }
-        let default_name = self
+        if self.render.is_some() {
+            self.set_status("a render is already running", StatusKind::Warn);
+            return;
+        }
+        let suggested = roughcut_core::profile::for_export(&self.project);
+        self.export_plan = Some(ExportPlan {
+            format: ExportFormat::Mlt,
+            width: suggested.width,
+            height: suggested.height,
+            fps: suggested.fps(),
+            suggested,
+        });
+    }
+
+    /// Carry out whatever the dialog was set to.
+    pub fn run_export(&mut self, plan: ExportPlan) {
+        self.export_plan = None;
+        if self.project.timeline.is_empty() {
+            return;
+        }
+        let ext = match plan.format {
+            ExportFormat::Mlt => "mlt",
+            ExportFormat::Mp4 => "mp4",
+        };
+        let stem = self
             .project_path
             .as_ref()
             .and_then(|p| p.file_stem())
-            .map(|s| format!("{}.mlt", s.to_string_lossy()))
-            .unwrap_or_else(|| "roughcut.mlt".to_string());
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "roughcut".to_string());
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Export MLT XML")
-            .add_filter("MLT XML", &["mlt"])
-            .set_file_name(default_name);
+            .set_title(match plan.format {
+                ExportFormat::Mlt => "Export MLT XML",
+                ExportFormat::Mp4 => "Export MP4",
+            })
+            .add_filter(
+                match plan.format {
+                    ExportFormat::Mlt => "MLT XML",
+                    ExportFormat::Mp4 => "MP4 video",
+                },
+                &[ext],
+            )
+            .set_file_name(format!("{stem}.{ext}"));
         if let Some(dir) = &self.settings.last_project_dir {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else {
             return;
         };
-        let opts = ExportOptions::default();
-        match mlt::write_to_file(&self.project, &opts, &path) {
-            Ok(()) => self.set_status(
-                format!(
-                    "exported {} clips / {} frames to {}",
-                    self.project.timeline.len(),
-                    self.timeline_len(),
-                    path.display()
+
+        let opts = ExportOptions {
+            profile: Some(plan.profile()),
+            ..ExportOptions::default()
+        };
+        match plan.format {
+            ExportFormat::Mlt => match mlt::write_to_file(&self.project, &opts, &path) {
+                Ok(()) => self.set_status(
+                    format!(
+                        "exported {} clips / {} frames to {}",
+                        self.project.timeline.len(),
+                        self.timeline_len(),
+                        path.display()
+                    ),
+                    StatusKind::Info,
                 ),
+                Err(e) => self.set_status(format!("{e:#}"), StatusKind::Error),
+            },
+            ExportFormat::Mp4 => self.start_render(&opts, &plan, &path),
+        }
+    }
+
+    /// Hand the cut to melt, on a thread of its own.
+    ///
+    /// Not a worker-pool job: those are background work nobody is waiting on,
+    /// suspended when the window loses focus and run at the lowest priority
+    /// the OS offers. A render is the opposite of all three.
+    fn start_render(&mut self, opts: &ExportOptions, plan: &ExportPlan, out: &Path) {
+        let Some(melt) = self.tools.melt.clone() else {
+            self.set_status(
+                "melt was not found — it comes with Shotcut, and is what does the encoding",
+                StatusKind::Error,
+            );
+            return;
+        };
+        // The XML melt reads is scratch, not something the user asked for.
+        let Some(dir) = crate::settings::config_dir() else {
+            self.set_status("nowhere to write the render's project file", StatusKind::Error);
+            return;
+        };
+        let scratch = dir.join("render.mlt");
+        if let Err(e) = mlt::write_to_file(&self.project, opts, &scratch) {
+            self.set_status(format!("{e:#}"), StatusKind::Error);
+            return;
+        }
+
+        // Length in the *export* rate, which is what melt will count in.
+        let total = {
+            let frames = self.timeline_len();
+            let from = self.project.fps();
+            let to = plan.fps;
+            roughcut_core::time::convert_frames(frames, from, to).max(1)
+        };
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let repaint = self.repaint.clone();
+        let (c, o, sc) = (cancel.clone(), out.to_path_buf(), scratch.clone());
+        std::thread::Builder::new()
+            .name("roughcut-render".into())
+            .spawn(move || {
+                let tx2 = tx.clone();
+                let r2 = repaint.clone();
+                let result = roughcut_core::render::to_mp4(&melt, &sc, &o, &c, move |f| {
+                    let _ = tx2.send(RenderMsg::Progress(f));
+                    r2();
+                });
+                let _ = tx.send(RenderMsg::Done(result.map_err(|e| format!("{e:#}"))));
+                repaint();
+            })
+            .expect("cannot spawn the render thread");
+
+        self.render = Some(RenderState {
+            out: out.to_path_buf(),
+            total,
+            frame: 0,
+            cancel,
+            rx,
+            scratch,
+        });
+        self.set_status(
+            format!("rendering {} frames to {}", total, out.display()),
+            StatusKind::Info,
+        );
+    }
+
+    /// Pick up whatever the render thread has said since last pass.
+    fn drain_render(&mut self) {
+        let Some(state) = &mut self.render else {
+            return;
+        };
+        let mut finished = None;
+        while let Ok(msg) = state.rx.try_recv() {
+            match msg {
+                RenderMsg::Progress(f) => state.frame = f,
+                RenderMsg::Done(r) => finished = Some(r),
+            }
+        }
+        let Some(result) = finished else {
+            return;
+        };
+        let state = self.render.take().expect("checked above");
+        let _ = std::fs::remove_file(&state.scratch);
+        match result {
+            Ok(()) => self.set_status(
+                format!("rendered {}", state.out.display()),
                 StatusKind::Info,
             ),
-            Err(e) => self.set_status(format!("{e:#}"), StatusKind::Error),
+            Err(e) if e.contains("cancelled") => {
+                self.set_status("render cancelled", StatusKind::Warn)
+            }
+            Err(e) => self.set_status(e, StatusKind::Error),
+        }
+    }
+
+    pub fn cancel_render(&mut self) {
+        if let Some(state) = &self.render {
+            state
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1942,6 +2146,7 @@ impl eframe::App for RoughcutApp {
 
         self.handle_dropped_files(ctx);
         self.drain_workers(ctx);
+        self.drain_render();
         self.sync_edl();
         self.monitor.pump_events();
         self.advance_playback();

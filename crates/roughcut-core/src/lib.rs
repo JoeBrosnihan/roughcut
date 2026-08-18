@@ -23,6 +23,7 @@ pub mod probe;
 pub mod profile;
 pub mod project_io;
 pub mod proxy;
+pub mod render;
 pub mod rotate;
 pub mod time;
 pub mod timeline;

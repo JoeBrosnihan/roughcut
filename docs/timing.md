@@ -168,3 +168,20 @@ changed; a new cut is simply a new path. Segment offsets are seconds, obtained
 by dividing profile frames by the profile rate — which is exact for
 variable-rate sources too, because a clip's duration in profile frames is
 defined to span its real running time.
+
+## Rendering
+
+Roughcut does not encode video and has no intention of learning how. `melt` is
+MLT's own renderer, ships with Shotcut, and consumes exactly the XML this
+program already writes, so exporting an MP4 is one child process.
+
+It runs on a thread of its own rather than in the worker pool. Pool jobs are
+background work nobody is waiting on: suspended when the window loses focus and
+run at the lowest priority the OS offers. A render is the opposite of all three.
+
+melt reports progress on a timer, not per frame, which has two consequences.
+A short render can finish without a word — so the cancel flag is checked on a
+poll rather than between messages, or a quiet render could not be cancelled at
+all. And whether any given render reports anything depends on machine load, so
+the streaming is proved against a recorded transcript in a unit test; the
+integration test only reports what really happened.
