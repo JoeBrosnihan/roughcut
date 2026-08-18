@@ -134,6 +134,11 @@ pub struct RoughcutApp {
     /// Set when the playhead crosses a cut, so the next media sync forces mpv
     /// to the new position instead of letting it keep playing where it was.
     force_media_jump: bool,
+    /// The timeline written out for mpv, and the cut list it describes. The
+    /// signature is in the file name so that editing the timeline yields a
+    /// path mpv has not seen — rewriting one path in place would leave it
+    /// playing the old cut.
+    edl: Option<(u64, PathBuf)>,
     /// A shift-drag in progress on the source scrub bar, as (anchor, current)
     /// source frames. Marks are only committed on release, so the drag costs
     /// one undo entry rather than one per pixel.
@@ -232,6 +237,7 @@ impl RoughcutApp {
             scrubbing: false,
             mark_drag: None,
             force_media_jump: false,
+            edl: None,
             fullscreen: false,
             fullscreen_pending: false,
             import_order: Vec::new(),
@@ -481,6 +487,40 @@ impl RoughcutApp {
         self.selected_clip.and_then(|id| self.project.clip(id))
     }
 
+    /// Write the timeline out for mpv, if it has changed since last time.
+    ///
+    /// Cheap to call every pass: the signature covers only what mpv would
+    /// play, so flagging a clip or renaming the project does not rewrite it.
+    fn sync_edl(&mut self) {
+        if self.project.timeline.is_empty() {
+            self.edl = None;
+            return;
+        }
+        let sig = roughcut_core::edl::signature(&self.project);
+        // Signature only: this runs every pass, and a filesystem stat per
+        // frame is exactly the kind of idle cost this application does not pay.
+        if self.edl.as_ref().is_some_and(|(s, _)| *s == sig) {
+            return;
+        }
+        let Some(text) = roughcut_core::edl::to_text(&self.project) else {
+            self.edl = None;
+            return;
+        };
+        let Some(dir) = crate::settings::config_dir() else {
+            return;
+        };
+        let path = dir.join(format!("timeline-{sig:016x}.edl"));
+        if let Err(e) = project_io::atomic_write(&path, text.as_bytes()) {
+            log::warn!("cannot write the timeline for playback: {e}");
+            self.edl = None;
+            return;
+        }
+        // Only the current one is of any use; the rest are last edit's.
+        if let Some(old) = self.edl.replace((sig, path)) {
+            let _ = std::fs::remove_file(old.1);
+        }
+    }
+
     /// The file and frame the monitor should be showing right now.
     pub fn current_media(&self) -> Option<(PathBuf, i64)> {
         match self.focus {
@@ -489,14 +529,12 @@ impl RoughcutApp {
                 let f = self.source_frame.clamp(0, clip.last_frame());
                 Some((clip.playback_path().to_path_buf(), f))
             }
+            // The whole cut list, as one stream. mpv can then open the next
+            // segment before the current one ends, which is the only way the
+            // joins stop being audible and visible.
             Focus::Timeline => {
-                let (idx, offset) = timeline::item_at(&self.project.timeline, self.playhead)?;
-                let item = self.project.timeline[idx];
-                let clip = self.project.clip(item.clip_id)?;
-                Some((
-                    clip.playback_path().to_path_buf(),
-                    (item.in_frame + offset).clamp(0, clip.last_frame()),
-                ))
+                let path = self.edl.as_ref().map(|(_, p)| p.clone())?;
+                Some((path, self.playhead.max(0)))
             }
         }
     }
@@ -521,16 +559,12 @@ impl RoughcutApp {
                 let Some(reported) = self.monitor.playback_frame() else {
                     return;
                 };
-                match self.focus {
-                    Focus::Source => {
-                        let last = self.position_max();
-                        self.set_position(reported);
-                        // The end of a bin clip really is the end.
-                        if reported >= last || self.monitor.eof {
-                            self.monitor.pause();
-                        }
-                    }
-                    Focus::Timeline => self.advance_timeline_playback(reported),
+                let last = self.position_max();
+                self.set_position(reported);
+                // The end really is the end, for a bin clip and for the cut
+                // list alike — mpv is playing one stream in both cases.
+                if reported >= last || self.monitor.eof {
+                    self.monitor.pause();
                 }
             }
             Transport::Reverse(_) => {
@@ -544,45 +578,6 @@ impl RoughcutApp {
             }
             Transport::Paused => {}
         }
-    }
-
-    /// Timeline playback runs one item at a time: when mpv passes the item's
-    /// out point we load the next one. There is a small hitch at each cut,
-    /// which is the honest cost of not building an EDL.
-    fn advance_timeline_playback(&mut self, reported_source_frame: i64) {
-        let Some((idx, _)) = timeline::item_at(&self.project.timeline, self.playhead) else {
-            self.monitor.pause();
-            return;
-        };
-        // Reached only with timeline focus, so `set_position` moves the
-        // timeline playhead and clamps it.
-        let item = self.project.timeline[idx];
-        let start = timeline::item_start(&self.project.timeline, idx);
-
-        // This item is finished either when mpv plays past its out point, or
-        // when mpv runs out of file — which happens whenever the out point is
-        // the last frame of its source, i.e. for any whole clip.
-        let done = reported_source_frame > item.out_frame || self.monitor.eof;
-        if done {
-            let next_start = start + item.len();
-            if next_start >= self.timeline_len() {
-                self.monitor.pause();
-                self.set_position(timeline::last_frame(&self.project.timeline));
-            } else {
-                log::debug!(
-                    "timeline: item {idx} done at source frame {reported_source_frame}                      (out {}, eof {}) - rolling to frame {next_start}",
-                    item.out_frame,
-                    self.monitor.eof
-                );
-                self.set_position(next_start);
-                // mpv is either at the end of a file or midway through the
-                // wrong part of one; either way it must be told where to go.
-                self.force_media_jump = true;
-            }
-            return;
-        }
-        let offset = (reported_source_frame - item.in_frame).max(0);
-        self.set_position(start + offset);
     }
 
     // The source monitor and the timeline each have their own playhead. These
@@ -1862,6 +1857,7 @@ impl eframe::App for RoughcutApp {
 
         self.handle_dropped_files(ctx);
         self.drain_workers(ctx);
+        self.sync_edl();
         self.monitor.pump_events();
         self.advance_playback();
         self.request_missing_thumbnails();

@@ -149,3 +149,22 @@ that wrote it: a clip measured wrongly by an older Roughcut stays wrong on disk
 otherwise. Where the file disagrees with what was recorded, the clip is
 corrected and any marks or cuts pointing past the end are pulled back to fit,
 which is said plainly rather than done silently.
+
+## Playing the timeline
+
+The timeline is handed to mpv as an EDL — one virtual stream describing the
+whole cut list — rather than played one clip at a time. Loading each item as it
+came up put a visible pause at every join, and no amount of care avoids that
+while mpv only knows about one file; with an EDL it can open the next segment
+before the current one ends. Measured across three real clips the joins stall
+for 0 ms.
+
+It also removes the arithmetic. `time-pos` in an EDL *is* the timeline
+position, so there is no per-item bookkeeping and nothing to convert.
+
+The EDL's signature is part of its file name. Rewriting one path in place would
+leave mpv holding the previous cut, since nothing about the name would have
+changed; a new cut is simply a new path. Segment offsets are seconds, obtained
+by dividing profile frames by the profile rate — which is exact for
+variable-rate sources too, because a clip's duration in profile frames is
+defined to span its real running time.

@@ -18,6 +18,7 @@
 pub mod import;
 pub mod mlt;
 pub mod model;
+pub mod edl;
 pub mod probe;
 pub mod profile;
 pub mod project_io;
