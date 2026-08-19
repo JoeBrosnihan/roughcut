@@ -123,6 +123,39 @@ at 48 resident; posters are small enough to keep for every clip. A clip
 scrolled out of sight for long enough loses only the ability to scrub until the
 cache hands it back.
 
+## The scrub bar shows the audio
+
+A clip's loudness envelope is the cheapest way to find the moment something
+happens in it. `waveform.rs` decodes the audio alone — `-vn`, mono, 8 kHz —
+and reduces it to 2048 peak levels, one byte each. Measured on real phone
+footage: **45–383 ms per clip**, and 2 KiB to keep. That ratio is why these are
+cached on disk like the sheets, and why, unlike the sheets, they are never
+evicted: a thousand-clip bin would hold 2 MB.
+
+Peaks, not RMS — the question is "where is something loud", and averaging
+flattens exactly the transients that answer it. Each clip is scaled to its own
+loudest moment, with a floor at about -40 dBFS. Both halves of that matter: a
+clip measured here peaks at **-39.2 dBFS**, so scaling to full scale would have
+drawn it as a flat line, while scaling with no floor at all would draw room
+tone as though it were a conversation.
+
+## Skimming shows a blurry frame before a sharp one
+
+Dragging across a long timeline used to move at the rate 4K frames come out of
+the decoder — a few per second — so the picture lagged the pointer by most of a
+second. While a seek is outstanding the monitor now draws the frame being
+sought from the scrub sheet, which is already resident and already indexed by
+frame; mpv's sharp frame replaces it the moment it lands.
+
+It costs one textured quad and no decoding. Nothing is drawn unless a real seek
+is in flight, so at rest and during playback this changes nothing. Frame steps
+are deliberately excluded — they land within a frame or two, and treating them
+as in flight would flash a placeholder on every arrow key.
+
+This is a stopgap for not having proxies turned on, not a replacement for them:
+the tiles are 96 px wide. Proxies remain the real answer, and the measurements
+in [verification.md](verification.md) say why.
+
 ## Variable frame rate
 
 Phones shoot it constantly, and it breaks the one agreement everything else

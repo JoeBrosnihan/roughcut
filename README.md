@@ -30,8 +30,8 @@ Drop files on the window, or press `Ctrl+I`. The whole loop is three keys:
 Then repeat. `Space` plays, `←` `→` step a frame, `Tab` moves between the source
 and the timeline. `S` splits and `X` deletes and closes the gap — Shotcut's keys.
 Hover a thumbnail to skim it; middle-click to flag one as good. Drag clips onto
-the timeline, or along it to reorder; drag the ruler above them to scrub.
-Right-click a clip to rotate one that came off a phone sideways.
+the timeline, along it to reorder, or by an edge to retrim; drag the ruler to
+scrub and middle-drag to pan. Right-click a clip to rotate one shot sideways.
 **Press `?` for the full keyboard map**, or read [KEYS.md](KEYS.md).
 
 `Ctrl+E` exports, sized and timed from the clips you used: a `.mlt` to finish

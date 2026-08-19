@@ -177,6 +177,61 @@ pub fn trim_tail(project: &mut Project, index: usize, playhead: i64) -> bool {
     true
 }
 
+/// Which end of a timeline item a trim is moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Head,
+    Tail,
+}
+
+/// How far `index`'s `edge` can really move, of the `delta` frames asked for.
+///
+/// Trimming by dragging differs from `trim_head` and `trim_tail` in one way
+/// that matters: it can give frames back. The source is still whole on disk,
+/// so an edge pulled outwards re-enters footage that was trimmed off earlier,
+/// as far as the clip's real extent and no further. What stops it otherwise is
+/// the same rule as everywhere else — an item may never be emptied.
+///
+/// Separate from applying it so the drag can be previewed at exactly the
+/// position it will land on, rather than showing a move that then snaps back.
+pub fn clamp_trim(project: &Project, index: usize, edge: Edge, delta: i64) -> i64 {
+    let Some(item) = project.timeline.get(index) else {
+        return 0;
+    };
+    let Some(clip) = project.clip(item.clip_id) else {
+        return 0;
+    };
+    match edge {
+        // The head may reach the start of the source, or the frame before the
+        // out point, whichever comes first.
+        Edge::Head => delta.clamp(-item.in_frame, item.out_frame - item.in_frame),
+        Edge::Tail => delta.clamp(
+            item.in_frame - item.out_frame,
+            clip.last_frame() - item.out_frame,
+        ),
+    }
+}
+
+/// Move one end of `index` by `delta` frames, rippling everything after it.
+///
+/// `delta` is clamped by `clamp_trim`, so an over-long drag lands on the limit
+/// rather than being refused outright — which is what dragging an edge past
+/// the end of its footage should feel like.
+pub fn trim_edge(project: &mut Project, index: usize, edge: Edge, delta: i64) -> bool {
+    let delta = clamp_trim(project, index, edge, delta);
+    if delta == 0 {
+        return false;
+    }
+    let Some(item) = project.timeline.get_mut(index) else {
+        return false;
+    };
+    match edge {
+        Edge::Head => item.in_frame += delta,
+        Edge::Tail => item.out_frame += delta,
+    }
+    true
+}
+
 /// Move the item at `from` so it sits at index `to`, sliding the rest along.
 /// Returns false when either index is out of range or nothing would change.
 pub fn reorder(project: &mut Project, from: usize, to: usize) -> bool {
@@ -408,6 +463,61 @@ mod tests {
         assert!(!trim_tail(&mut p, 0, 0), "trimming away every frame is refused");
         assert!(!trim_head(&mut p, 0, 100), "playhead past the clip is refused");
         assert_eq!(p.timeline[0].len(), 100);
+    }
+
+    #[test]
+    fn dragging_an_edge_shortens_and_ripples() {
+        let (mut p, _) = project_with(&[(100, 199), (0, 99)]);
+        assert!(trim_edge(&mut p, 0, Edge::Head, 20));
+        assert_eq!((p.timeline[0].in_frame, p.timeline[0].out_frame), (120, 199));
+        assert_eq!(item_start(&p.timeline, 1), 80, "the rest ripples earlier");
+
+        assert!(trim_edge(&mut p, 0, Edge::Tail, -30));
+        assert_eq!(p.timeline[0].out_frame, 169);
+        assert_eq!(total_frames(&p.timeline), 150);
+    }
+
+    /// The difference from `trim_head` and `trim_tail`: an edge can be pulled
+    /// back out into footage that was trimmed away earlier.
+    #[test]
+    fn dragging_an_edge_outwards_gives_frames_back() {
+        let (mut p, _) = project_with(&[(100, 199)]);
+        assert!(trim_edge(&mut p, 0, Edge::Head, -40));
+        assert_eq!(p.timeline[0].in_frame, 60);
+        assert!(trim_edge(&mut p, 0, Edge::Tail, 50));
+        assert_eq!(p.timeline[0].out_frame, 249);
+        assert_eq!(total_frames(&p.timeline), 190);
+    }
+
+    #[test]
+    fn an_edge_stops_at_the_end_of_the_footage() {
+        // The clip behind these is 1000 frames long.
+        let (mut p, _) = project_with(&[(0, 99)]);
+        assert_eq!(clamp_trim(&p, 0, Edge::Head, -500), 0, "already at frame 0");
+        assert_eq!(clamp_trim(&p, 0, Edge::Tail, 5000), 900);
+        assert!(trim_edge(&mut p, 0, Edge::Tail, 5000));
+        assert_eq!(p.timeline[0].out_frame, 999);
+        assert!(!trim_edge(&mut p, 0, Edge::Tail, 1), "nothing left to give");
+    }
+
+    #[test]
+    fn an_edge_never_empties_its_clip() {
+        let (mut p, _) = project_with(&[(0, 99)]);
+        assert!(trim_edge(&mut p, 0, Edge::Head, 5000));
+        assert_eq!(p.timeline[0].len(), 1, "one frame always survives");
+        assert!(!trim_edge(&mut p, 0, Edge::Head, 1));
+
+        let (mut p, _) = project_with(&[(0, 99)]);
+        assert!(trim_edge(&mut p, 0, Edge::Tail, -5000));
+        assert_eq!(p.timeline[0].len(), 1);
+    }
+
+    #[test]
+    fn trimming_an_item_that_is_not_there_does_nothing() {
+        let (mut p, _) = project_with(&[(0, 99)]);
+        assert_eq!(clamp_trim(&p, 7, Edge::Head, 10), 0);
+        assert!(!trim_edge(&mut p, 7, Edge::Head, 10));
+        assert!(!trim_edge(&mut p, 0, Edge::Head, 0));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use roughcut_core::probe::MediaInfo;
 use roughcut_core::project_io;
 use roughcut_core::rotate::Turn;
 use roughcut_core::time::{format_timecode, Rational};
-use roughcut_core::timeline;
+use roughcut_core::timeline::{self, Edge};
 use roughcut_core::tools::{expand_drop, Tools};
 use roughcut_core::undo::History;
 
@@ -32,6 +32,22 @@ use std::sync::Arc;
 pub enum Focus {
     Source,
     Timeline,
+}
+
+/// Which of a source clip's two marks a drag has hold of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkEdge {
+    In,
+    Out,
+}
+
+/// A timeline clip being retrimmed by dragging one of its edges.
+#[derive(Debug, Clone, Copy)]
+pub struct TrimDrag {
+    pub index: usize,
+    pub edge: Edge,
+    /// Frames moved so far, already clamped to what the footage allows.
+    pub delta: i64,
 }
 
 /// A texture of tiles, plus how to index it.
@@ -182,6 +198,8 @@ pub struct RoughcutApp {
     pub dragging_item: Option<usize>,
     /// A scrub in progress on the timeline ruler.
     pub scrubbing: bool,
+    /// The middle button is held and panning the timeline.
+    pub panning: bool,
     /// Set when the playhead crosses a cut, so the next media sync forces mpv
     /// to the new position instead of letting it keep playing where it was.
     force_media_jump: bool,
@@ -203,6 +221,13 @@ pub struct RoughcutApp {
     /// source frames. Marks are only committed on release, so the drag costs
     /// one undo entry rather than one per pixel.
     pub mark_drag: Option<(i64, i64)>,
+    /// One mark being dragged by its handle, as (which end, where it is now).
+    /// Committed on release for the same reason `mark_drag` is.
+    pub mark_grab: Option<(MarkEdge, i64)>,
+    /// A timeline clip being retrimmed by its edge, as (item, which end, how
+    /// far it has moved in frames). The move is previewed from here and only
+    /// written to the project when the button comes up.
+    pub trim_drag: Option<TrimDrag>,
     /// Mirrors the viewport's fullscreen state, so F11 toggles rather than
     /// guessing. `fullscreen_pending` defers the actual viewport command to
     /// `update`, which is the only place with a `Context` to send it on.
@@ -224,6 +249,11 @@ pub struct RoughcutApp {
     /// The dense sheets hover-scrubbing indexes into. Each is a couple of
     /// megabytes, so only the most recently used are kept resident.
     pub sheets: HashMap<ClipId, Thumb>,
+    /// One loudness envelope per clip that has been opened in the monitor, at
+    /// a byte a bucket. Two kilobytes each, so unlike the sheets these are
+    /// never evicted — a bin of a thousand clips would still be 2 MB.
+    pub waveforms: HashMap<ClipId, Vec<u8>>,
+    waveform_requested: HashSet<ClipId>,
     /// Bumped every frame, and stamped on a sheet whenever it is drawn, so
     /// the least recently *seen* sheet can be identified for eviction.
     sheet_clock: u64,
@@ -295,7 +325,10 @@ impl RoughcutApp {
             timeline_scroll_to: None,
             dragging_item: None,
             scrubbing: false,
+            panning: false,
             mark_drag: None,
+            mark_grab: None,
+            trim_drag: None,
             force_media_jump: false,
             clipboard: None,
             export_plan: None,
@@ -307,6 +340,8 @@ impl RoughcutApp {
             probe_results: HashMap::new(),
             posters: HashMap::new(),
             sheets: HashMap::new(),
+            waveforms: HashMap::new(),
+            waveform_requested: HashSet::new(),
             sheet_clock: 0,
             thumb_requested: HashSet::new(),
             sheet_requested: HashSet::new(),
@@ -619,6 +654,12 @@ impl RoughcutApp {
     fn advance_playback(&mut self) {
         match self.monitor.transport {
             Transport::Forward(_) => {
+                // A seek issued mid-playback has not landed yet, and mpv is
+                // still reporting where it was. Adopting that would drag the
+                // playhead straight back off the point just clicked on.
+                if self.monitor.is_seeking() {
+                    return;
+                }
                 let Some(reported) = self.monitor.playback_frame() else {
                     return;
                 };
@@ -1049,6 +1090,110 @@ impl RoughcutApp {
     }
 
     /// Commit a shift-drag on the scrub bar as the clip's in and out points.
+    /// Move the playhead because the pointer said so, without stopping.
+    ///
+    /// Clicking the bar used to pause, which made playing and looking at the
+    /// same time impossible: every attempt to jump somewhere killed the thing
+    /// being watched. Seeking and playing are separate ideas, so this only
+    /// does the one that was asked for.
+    ///
+    /// While mpv is playing it owns its own position, and `show` deliberately
+    /// leaves it alone; the new position therefore has to be pushed at it
+    /// explicitly. One seek at a time — dragging produces a target per pixel,
+    /// and every one of them but the last is already out of date.
+    pub fn scrub_to(&mut self, frame: i64) {
+        self.set_position(frame);
+        if self.monitor.transport.is_playing() && !self.monitor.is_seeking() {
+            self.force_media_jump = true;
+        }
+    }
+
+    /// The last word on where a scrub ended, issued even if a seek is already
+    /// in flight — otherwise a drag can finish on a frame mpv never hears
+    /// about, and playback carries on from wherever the last seek landed.
+    pub fn scrub_settled(&mut self) {
+        if self.monitor.transport.is_playing() {
+            self.force_media_jump = true;
+        }
+    }
+
+    /// Start dragging one end of the marked range.
+    pub fn grab_mark(&mut self, edge: MarkEdge, frame: i64) {
+        self.mark_grab = Some((edge, frame));
+        self.scrub_to(frame);
+    }
+
+    /// Move a grabbed mark, keeping it on its own side of the other one.
+    pub fn drag_mark(&mut self, frame: i64) {
+        let Some((edge, _)) = self.mark_grab else {
+            return;
+        };
+        let Some(clip) = self.selected_source() else {
+            return;
+        };
+        let frame = match edge {
+            MarkEdge::In => frame.min(clip.mark_out.unwrap_or(clip.last_frame())),
+            MarkEdge::Out => frame.max(clip.mark_in.unwrap_or(0)),
+        }
+        .clamp(0, clip.last_frame());
+        self.mark_grab = Some((edge, frame));
+        // The monitor follows the handle: a mark you cannot see the frame of
+        // is a mark you are placing blind.
+        self.scrub_to(frame);
+    }
+
+    pub fn commit_mark_grab(&mut self) {
+        let Some((edge, frame)) = self.mark_grab.take() else {
+            return;
+        };
+        let Some(id) = self.selected_clip else { return };
+        self.edit(|p| {
+            let Some(c) = p.clip_mut(id) else { return false };
+            match edge {
+                MarkEdge::In if c.mark_in != Some(frame) => c.mark_in = Some(frame),
+                MarkEdge::Out if c.mark_out != Some(frame) => c.mark_out = Some(frame),
+                _ => return false,
+            }
+            true
+        });
+    }
+
+    /// Take hold of a timeline clip's head or tail.
+    pub fn grab_trim(&mut self, index: usize, edge: Edge) {
+        self.trim_drag = Some(TrimDrag {
+            index,
+            edge,
+            delta: 0,
+        });
+    }
+
+    /// Move a grabbed edge, clamped to what the source behind it allows.
+    pub fn drag_trim(&mut self, delta: i64) {
+        let Some(drag) = self.trim_drag else { return };
+        let delta = timeline::clamp_trim(&self.project, drag.index, drag.edge, delta);
+        self.trim_drag = Some(TrimDrag { delta, ..drag });
+    }
+
+    pub fn commit_trim(&mut self) {
+        let Some(drag) = self.trim_drag.take() else {
+            return;
+        };
+        if !self.edit(|p| timeline::trim_edge(p, drag.index, drag.edge, drag.delta)) {
+            return;
+        }
+        self.selected_item = Some(drag.index);
+        self.focus = Focus::Timeline;
+        // Land on the edge that just moved, so the frame now at the cut is the
+        // one on screen — the whole reason for retrimming by hand.
+        let start = timeline::item_start(&self.project.timeline, drag.index);
+        let at = match drag.edge {
+            Edge::Head => start,
+            Edge::Tail => start + self.project.timeline[drag.index].len() - 1,
+        };
+        self.set_position(at);
+        self.force_media_jump = true;
+    }
+
     pub fn commit_mark_drag(&mut self) {
         let Some((a, b)) = self.mark_drag.take() else {
             return;
@@ -1889,6 +2034,16 @@ impl RoughcutApp {
                         self.set_status(format!("{e:#}"), StatusKind::Error);
                     }
                 },
+                JobResult::Waved { clip_id, result } => match result {
+                    Ok(peaks) => {
+                        self.waveforms.insert(clip_id, peaks);
+                    }
+                    // Silent: a clip whose audio cannot be read still edits
+                    // perfectly well, and the bar simply stays empty. Saying
+                    // so in the status bar would be noise about something
+                    // nobody asked for.
+                    Err(e) => log::debug!("waveform for {clip_id}: {e:#}"),
+                },
             }
         }
     }
@@ -2099,6 +2254,34 @@ impl RoughcutApp {
             fps: self.project.fps(),
             tiles,
             cache_dir: crate::settings::thumb_cache_dir(),
+        });
+    }
+
+    /// Ask for the clip's loudness envelope, if it has audio and has not been
+    /// asked for already.
+    ///
+    /// Called from the scrub bar as it draws, so only clips actually opened in
+    /// the monitor ever cost an audio decode.
+    pub fn request_waveform(&mut self, id: ClipId) {
+        if self.waveforms.contains_key(&id) || !self.tools.has_ffmpeg() {
+            return;
+        }
+        let Some(clip) = self.project.clip(id) else {
+            return;
+        };
+        if !clip.has_audio {
+            return;
+        }
+        // The proxy carries the same audio re-encoded, and reading it means
+        // decoding 540p instead of 4K to throw the picture away.
+        let path = clip.playback_path().to_path_buf();
+        if !self.waveform_requested.insert(id) {
+            return;
+        }
+        self.workers.submit(Job::Waveform {
+            clip_id: id,
+            path,
+            cache_dir: crate::settings::waveform_cache_dir(),
         });
     }
 

@@ -21,6 +21,10 @@ pub const PLAYHEAD: Color32 = Color32::from_rgb(0xff, 0xd8, 0x4c);
 /// colour: a flag is a judgement you made, not something the tool is telling
 /// you about the file.
 pub const FLAG: Color32 = Color32::from_rgb(0xff, 0xc8, 0x4c);
+/// The audio envelope under the scrub bar. Deliberately unsaturated: it is a
+/// map of where to look, drawn underneath the marks, and it must never compete
+/// with them for attention.
+pub const WAVEFORM: Color32 = Color32::from_rgb(0x5c, 0x74, 0x8c);
 pub const VIDEO_LETTERBOX: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0b);
 
 /// Width of the accent border marking the focused region.

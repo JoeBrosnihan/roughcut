@@ -521,6 +521,23 @@ impl Monitor {
         self.reported_frame
     }
 
+    /// A seek is still in flight, so what mpv reports right now is where it
+    /// was, not where it is going, and the picture on screen is the old one.
+    ///
+    /// Steps are excluded: they land within a frame or two, and treating them
+    /// as "in flight" would make every arrow key flash a placeholder.
+    ///
+    /// Bounded in time deliberately. A seek that never completes — a damaged
+    /// file, a stream that will not restart — would otherwise leave playback
+    /// permanently unable to report progress, which looks exactly like the
+    /// application having frozen.
+    pub fn is_seeking(&self) -> bool {
+        match self.pending {
+            Some(Pending::Seek { at, .. }) => at.elapsed() < Duration::from_millis(500),
+            Some(Pending::Step { .. }) | None => false,
+        }
+    }
+
     /// True when hardware decoding is not in use, which §3 says to warn about.
     pub fn software_decoding(&self) -> bool {
         self.player.is_some() && self.hwdec.is_none()

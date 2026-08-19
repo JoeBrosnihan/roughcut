@@ -14,6 +14,7 @@ use roughcut_core::proxy;
 use roughcut_core::rotate::{self, Turn};
 use roughcut_core::time::{frame_to_seconds, Rational};
 use roughcut_core::tools::{quiet_command, Tools};
+use roughcut_core::waveform;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -100,6 +101,12 @@ pub enum Job {
         path: PathBuf,
         turn: Turn,
     },
+    /// The loudness envelope drawn under the scrub bar.
+    Waveform {
+        clip_id: ClipId,
+        path: PathBuf,
+        cache_dir: Option<PathBuf>,
+    },
 }
 
 /// Tiles packed into one image, row-major. Kept UI-framework-free so workers
@@ -147,6 +154,10 @@ pub enum JobResult {
         clip_id: ClipId,
         result: Result<MediaInfo>,
     },
+    Waved {
+        clip_id: ClipId,
+        result: Result<Vec<u8>>,
+    },
 }
 
 struct Queue {
@@ -161,7 +172,10 @@ impl Job {
         match self {
             // Probing gates import, and a rotation is something the user just
             // asked for and is sitting there waiting on.
-            Job::Probe { .. } | Job::Rotate { .. } => Priority::High,
+            // A waveform is only ever asked for about the clip open in the
+            // monitor right now, which makes it the definition of work
+            // somebody is waiting on.
+            Job::Probe { .. } | Job::Rotate { .. } | Job::Waveform { .. } => Priority::High,
             Job::Thumbs { tiles, .. } if *tiles <= 1 => Priority::High,
             Job::Thumbs { .. } | Job::Proxy { .. } => Priority::Low,
         }
@@ -423,7 +437,55 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             };
             JobResult::Rotated { clip_id, result }
         }
+        Job::Waveform {
+            clip_id,
+            path,
+            cache_dir,
+        } => {
+            let result = match &shared.tools.ffmpeg {
+                Some(ffmpeg) => make_waveform(ffmpeg, &path, cache_dir.as_deref()),
+                None => Err(anyhow::anyhow!("ffmpeg is not available")),
+            };
+            JobResult::Waved { clip_id, result }
+        }
     }
+}
+
+/// A clip's audio envelope, kept on disk between sessions.
+///
+/// Reading the audio of a long clip is seconds of ffmpeg; the result is two
+/// kilobytes. Nothing else in the application has a ratio like that, so this
+/// is cached even more eagerly than the filmstrips are.
+fn make_waveform(
+    ffmpeg: &std::path::Path,
+    path: &std::path::Path,
+    cache_dir: Option<&std::path::Path>,
+) -> Result<Vec<u8>> {
+    let buckets = waveform::BUCKETS;
+    let cache_file = cache_dir.map(|d| {
+        d.join(format!(
+            "{:016x}-{buckets}.peaks",
+            fingerprint(path, &[buckets as i64])
+        ))
+    });
+    if let Some(file) = &cache_file {
+        if let Ok(bytes) = std::fs::read(file) {
+            if bytes.len() == buckets {
+                return Ok(bytes);
+            }
+        }
+    }
+
+    let peaks = waveform::extract(ffmpeg, path, buckets)?;
+    if let Some(file) = &cache_file {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(file, &peaks) {
+            log::debug!("cannot cache peaks at {}: {e}", file.display());
+        }
+    }
+    Ok(peaks)
 }
 
 /// One frame, scaled down, straight out of ffmpeg as a PNG on stdout.
@@ -444,19 +506,17 @@ pub fn tile_for_frame(frame: i64, duration_frames: i64, tiles: usize) -> usize {
     ((t * tiles as f64) as usize).min(tiles - 1)
 }
 
-/// Identifies a cached sheet.
+/// Identifies a file, the version of it on disk right now, and whatever else
+/// would change what is derived from it.
 ///
-/// Everything that would change the picture goes in: which file, the version
-/// of it on disk right now, and the shape of the sheet. A rotated or replaced
-/// source therefore misses rather than serving a stale strip, and no explicit
-/// invalidation is needed anywhere.
-fn cache_key(path: &std::path::Path, duration_frames: i64, tiles: usize) -> String {
+/// A rotated or replaced source therefore misses rather than serving a stale
+/// strip or a waveform of the wrong audio, and no explicit invalidation is
+/// needed anywhere.
+fn fingerprint(path: &std::path::Path, extra: &[i64]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut h);
-    duration_frames.hash(&mut h);
-    tiles.hash(&mut h);
-    THUMB_WIDTH.hash(&mut h);
+    extra.hash(&mut h);
     if let Ok(meta) = std::fs::metadata(path) {
         meta.len().hash(&mut h);
         if let Ok(t) = meta.modified() {
@@ -465,7 +525,18 @@ fn cache_key(path: &std::path::Path, duration_frames: i64, tiles: usize) -> Stri
             }
         }
     }
-    format!("{:016x}", h.finish())
+    h.finish()
+}
+
+/// Identifies a cached sheet.
+fn cache_key(path: &std::path::Path, duration_frames: i64, tiles: usize) -> String {
+    format!(
+        "{:016x}",
+        fingerprint(
+            path,
+            &[duration_frames, tiles as i64, i64::from(THUMB_WIDTH)],
+        )
+    )
 }
 
 fn read_cached(file: &std::path::Path, tiles: usize) -> Option<Sheet> {
@@ -819,6 +890,60 @@ mod tests {
             Job::Probe { path: PathBuf::from("a.mp4") }.priority(),
             Priority::High
         );
+    }
+
+    /// A waveform is asked for about the clip on screen right now, so it must
+    /// never queue behind the sheets and proxies of clips nobody is looking
+    /// at.
+    #[test]
+    fn a_waveform_does_not_queue_behind_background_work() {
+        let wave = Job::Waveform {
+            clip_id: ClipId::new(),
+            path: PathBuf::from("a.mp4"),
+            cache_dir: None,
+        };
+        assert_eq!(wave.priority(), Priority::High);
+    }
+
+    /// The second look at a clip must not decode its audio again: that is the
+    /// whole reason these are written to disk.
+    #[test]
+    fn a_waveform_is_served_from_the_cache_the_second_time() {
+        let Some(ffmpeg) = Tools::discover().ffmpeg else {
+            eprintln!("SKIPPED: ffmpeg is required");
+            return;
+        };
+        let dir = std::env::temp_dir().join("roughcut-wavecache-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("tone.mp4");
+        let ok = quiet_command(&ffmpeg)
+            .args(["-y", "-v", "error"])
+            .args(["-f", "lavfi", "-i", "testsrc2=size=160x120:rate=30:d=2"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+            .args(["-c:a", "aac", "-shortest"])
+            .arg(&clip)
+            .status()
+            .expect("cannot run ffmpeg")
+            .success();
+        assert!(ok);
+
+        let first = make_waveform(&ffmpeg, &clip, Some(&dir)).expect("no peaks");
+        assert_eq!(first.len(), waveform::BUCKETS);
+
+        // Take ffmpeg away entirely. A cache hit cannot need it; a miss would
+        // fail outright, which is exactly the distinction being tested.
+        let second = make_waveform(std::path::Path::new("no-such-ffmpeg"), &clip, Some(&dir))
+            .expect("the second call did not come from the cache");
+        assert_eq!(first, second);
+
+        // A file that changed underneath us is a different fingerprint, so the
+        // stale peaks are never served.
+        std::fs::write(&clip, b"not a video any more").unwrap();
+        assert!(make_waveform(std::path::Path::new("no-such-ffmpeg"), &clip, Some(&dir)).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

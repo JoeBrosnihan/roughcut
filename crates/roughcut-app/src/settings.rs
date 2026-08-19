@@ -144,6 +144,11 @@ pub fn thumb_cache_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("thumbnails"))
 }
 
+/// Where audio envelopes are kept between sessions, for the same reason.
+pub fn waveform_cache_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("waveforms"))
+}
+
 pub fn autosave_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("autosave.roughcut"))
 }

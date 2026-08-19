@@ -7,12 +7,14 @@ use crate::workers;
 use egui::{CornerRadius, Rect, Sense, Stroke, StrokeKind};
 use roughcut_core::model::ClipId;
 use roughcut_core::time::format_timecode;
-use roughcut_core::timeline as tl;
+use roughcut_core::timeline::{self as tl, Edge};
 
 pub const TIMELINE_HEIGHT: f32 = 160.0;
 const RULER_HEIGHT: f32 = 18.0;
 const BLOCK_TOP: f32 = 26.0;
 const BLOCK_HEIGHT: f32 = 92.0;
+/// How close the pointer has to be to a cut to take hold of the edge there.
+const EDGE_GRAB: f32 = 6.0;
 
 pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
     egui::TopBottomPanel::bottom("timeline")
@@ -36,6 +38,7 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                 };
             }
             wheel_input(app, ui, rect, total, usable);
+            pan_input(app, ui, rect, total, usable);
             let px_per_frame = app.zoom;
 
             let painter = ui.painter_at(rect);
@@ -160,16 +163,90 @@ fn wheel_input(app: &mut RoughcutApp, ui: &egui::Ui, rect: Rect, total: i64, usa
     app.timeline_scroll_to = Some(target);
 }
 
+/// Hold the middle button and move: the timeline follows the pointer.
+///
+/// The wheel already scrolls sideways, but a wheel moves in notches and a long
+/// timeline is a great many notches. Panning is the gesture for crossing
+/// distance. It is on the middle button because both the others already mean
+/// something over the blocks, and because it then works identically whether
+/// the pointer is over a clip, the ruler or empty space.
+fn pan_input(app: &mut RoughcutApp, ui: &egui::Ui, rect: Rect, total: i64, usable: f32) {
+    let (down, delta, pointer) = ui.input(|i| {
+        (
+            i.pointer.button_down(egui::PointerButton::Middle),
+            i.pointer.delta(),
+            i.pointer.latest_pos(),
+        )
+    });
+
+    if !down {
+        app.panning = false;
+        return;
+    }
+    // Only a press that began over the timeline pans it; the middle button
+    // means something else entirely over the bin.
+    if !app.panning {
+        if !pointer.is_some_and(|p| rect.contains(p)) {
+            return;
+        }
+        app.panning = true;
+    }
+
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    if delta.x == 0.0 {
+        return;
+    }
+    let content = (total as f32 * app.zoom).max(usable);
+    let max_offset = (content - usable).max(0.0);
+    if max_offset <= 0.0 {
+        return;
+    }
+    // Drag right, the content follows the hand and the view moves left.
+    let target = (app.timeline_offset - delta.x).clamp(0.0, max_offset);
+    app.timeline_scroll_to = Some(target);
+}
+
 /// The band the clip blocks occupy. Above it is the ruler, below it is empty.
 fn is_on_blocks(y: f32, canvas: Rect) -> bool {
     y >= canvas.top() + BLOCK_TOP && y <= canvas.top() + BLOCK_TOP + BLOCK_HEIGHT
 }
 
-/// Dragging the timeline: on a clip it moves the clip, anywhere else it
-/// scrubs.
+/// The clip edge within grabbing distance of `x`, if any.
 ///
-/// Splitting by where the drag *starts* means the two gestures never compete —
-/// the ruler is a scrub strip and the blocks are objects you can pick up, and
+/// Two clips share a boundary, so which side of it the pointer is on decides
+/// which of them it belongs to: left of the line takes the outgoing clip's
+/// tail, right of it takes the incoming clip's head. That is the only
+/// convention under which both edges of a cut can be reached at all.
+///
+/// A block too narrow to hold an edge at each end is left alone entirely —
+/// otherwise a zoomed-out clip becomes impossible to pick up and move.
+fn edge_at(app: &RoughcutApp, x: f32, canvas: Rect, ppf: f32) -> Option<(usize, Edge)> {
+    let mut start = 0i64;
+    for (i, item) in app.project.timeline.iter().enumerate() {
+        let head = canvas.left() + start as f32 * ppf;
+        let tail = canvas.left() + (start + item.len()) as f32 * ppf;
+        start += item.len();
+        if tail - head < EDGE_GRAB * 3.0 {
+            continue;
+        }
+        // The first clip has nothing to its left, so its head answers for the
+        // space on both sides of the very start of the timeline.
+        let from_head = if i == 0 { x >= head - EDGE_GRAB } else { x >= head };
+        if from_head && x - head <= EDGE_GRAB {
+            return Some((i, Edge::Head));
+        }
+        if x < tail && tail - x <= EDGE_GRAB {
+            return Some((i, Edge::Tail));
+        }
+    }
+    None
+}
+
+/// Dragging the timeline: on a clip edge it retrims, on the body of a clip it
+/// moves the clip, anywhere else it scrubs.
+///
+/// Splitting by where the drag *starts* means the gestures never compete — the
+/// ruler is a scrub strip and the blocks are objects you can pick up, and
 /// neither has to guess at the other's intent.
 ///
 /// Handled on the canvas rather than with a widget per block: one interactive
@@ -186,22 +263,49 @@ fn handle_drag(
         let frame = frame_at_x(x, canvas, px_per_frame, app);
         tl::item_at(&app.project.timeline, frame).map(|(i, _)| i)
     };
+    // Where the button actually went down. egui only calls a press a drag once
+    // the pointer has moved past a threshold, so by then it is several pixels
+    // from where the gesture really began — near enough to lose an edge, and
+    // far enough to visibly offset every drag measured from it.
+    let origin = || ui.input(|i| i.pointer.press_origin());
 
-    // A horizontal-resize cursor over the ruler advertises that it scrubs.
+    // A horizontal-resize cursor over the ruler advertises that it scrubs, and
+    // over a cut that the cut can be moved.
     if let Some(p) = response.hover_pos() {
-        if !is_on_blocks(p.y, canvas) {
+        if !is_on_blocks(p.y, canvas)
+            || edge_at(app, p.x, canvas, px_per_frame).is_some()
+            || app.trim_drag.is_some()
+        {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
     }
 
     if response.drag_started() {
-        match response.interact_pointer_pos() {
+        match origin().or_else(|| response.interact_pointer_pos()) {
             Some(p) if is_on_blocks(p.y, canvas) => {
-                app.dragging_item = index_at(app, p.x);
+                match edge_at(app, p.x, canvas, px_per_frame) {
+                    Some((index, edge)) => app.grab_trim(index, edge),
+                    None => app.dragging_item = index_at(app, p.x),
+                }
             }
             Some(_) => app.scrubbing = true,
             None => {}
         }
+    }
+
+    // Retrimming wins over everything: it was started on an edge, and an edge
+    // is a smaller target than anything else here.
+    if app.trim_drag.is_some() {
+        if response.dragged() {
+            if let (Some(p), Some(o)) = (response.interact_pointer_pos(), origin()) {
+                app.drag_trim(((p.x - o.x) / px_per_frame.max(1e-6)).round() as i64);
+            }
+            paint_trim(app, ui, canvas, px_per_frame);
+        }
+        if response.drag_stopped() {
+            app.commit_trim();
+        }
+        return;
     }
 
     // Scrubbing wins outright once started; the playhead follows the pointer
@@ -209,13 +313,13 @@ fn handle_drag(
     if app.scrubbing {
         if response.dragged() {
             if let Some(p) = response.interact_pointer_pos() {
-                app.monitor.pause();
                 app.focus = Focus::Timeline;
-                app.set_position(frame_at_x(p.x, canvas, px_per_frame, app));
+                app.scrub_to(frame_at_x(p.x, canvas, px_per_frame, app));
             }
         }
         if response.drag_stopped() {
             app.scrubbing = false;
+            app.scrub_settled();
         }
         return;
     }
@@ -269,6 +373,69 @@ fn handle_drag(
             app.reorder_item(from, to);
         }
     }
+}
+
+/// Show where a retrim would leave the clip.
+///
+/// The block is drawn at the length it would become, because that is what
+/// really happens: this timeline has no gaps, so a clip trimmed at the head
+/// stays anchored where it is and everything after it moves. The grabbed edge
+/// is marked separately, otherwise trimming a head and trimming a tail would
+/// look identical.
+fn paint_trim(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, ppf: f32) {
+    let Some(drag) = app.trim_drag else { return };
+    let Some(item) = app.project.timeline.get(drag.index) else {
+        return;
+    };
+    let new_len = match drag.edge {
+        Edge::Head => item.len() - drag.delta,
+        Edge::Tail => item.len() + drag.delta,
+    };
+    let start = tl::item_start(&app.project.timeline, drag.index);
+    let left = canvas.left() + start as f32 * ppf;
+    let block = Rect::from_min_max(
+        egui::pos2(left, canvas.top() + BLOCK_TOP),
+        egui::pos2(
+            left + new_len as f32 * ppf,
+            canvas.top() + BLOCK_TOP + BLOCK_HEIGHT,
+        ),
+    );
+
+    let painter = ui.painter_at(canvas);
+    let radius = CornerRadius::same(theme::CLIP_RADIUS);
+    painter.rect_filled(block, radius, theme::ACCENT.linear_multiply(0.20));
+    painter.rect_stroke(
+        block,
+        radius,
+        Stroke::new(2.0, theme::ACCENT),
+        StrokeKind::Inside,
+    );
+
+    let edge_x = match drag.edge {
+        Edge::Head => block.left(),
+        Edge::Tail => block.right(),
+    };
+    painter.line_segment(
+        [
+            egui::pos2(edge_x, canvas.top() + RULER_HEIGHT),
+            egui::pos2(edge_x, canvas.top() + BLOCK_TOP + BLOCK_HEIGHT + 4.0),
+        ],
+        Stroke::new(3.0, theme::MARK_IN),
+    );
+
+    // How far, and what is left: a trim is a decision about duration, and
+    // guessing it from the width of a rectangle is no way to make one.
+    painter.text(
+        egui::pos2(edge_x + 5.0, canvas.top() + BLOCK_TOP + 4.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "{:+} · {}",
+            drag.delta,
+            format_timecode(new_len, app.fps())
+        ),
+        egui::FontId::monospace(11.0),
+        theme::TEXT,
+    );
 }
 
 /// The bin clip currently being dragged, if any.
@@ -501,10 +668,10 @@ fn handle_click(app: &mut RoughcutApp, response: &egui::Response, canvas: Rect, 
         return;
     };
     let frame = ((pos.x - canvas.left()) / ppf.max(1e-6)).round() as i64;
-    app.monitor.pause();
     app.focus = Focus::Timeline;
     // Set focus first: `set_position` clamps against whichever region has it.
-    app.set_position(frame);
+    app.scrub_to(frame);
+    app.scrub_settled();
     app.selected_item = tl::item_at(&app.project.timeline, app.playhead).map(|(i, _)| i);
 }
 
