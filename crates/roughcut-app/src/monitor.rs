@@ -538,11 +538,6 @@ impl Monitor {
         }
     }
 
-    /// True when hardware decoding is not in use, which §3 says to warn about.
-    pub fn software_decoding(&self) -> bool {
-        self.player.is_some() && self.hwdec.is_none()
-    }
-
     /// Median / p95 / max seek latency in milliseconds, for checking §3's
     /// "keypress to visible frame change" and "seek to arbitrary frame"
     /// budgets against reality.

@@ -68,3 +68,17 @@ process with a progress bar. Requested by the user.
 profile at import. It is now suggested from the clips actually used and
 overridable at export, because footage off several phones has no single obvious
 answer. Requested by the user. See [timing.md](timing.md).
+
+**13. The software-decode warning is gone** (§3). The brief made hardware
+decode mandatory and required a standing notice when it is unavailable. mpv
+leaves `hwdec-current` unset until it has actually built a decoder, so the
+notice appeared briefly on every clip load and was wrong nearly every time it
+appeared. Worse, it lived in a panel that took height only when it had
+something to say, so each false alarm reflowed the video, the bin and the
+timeline twice.
+
+The condition is still logged, once, at the point the file loads, which is
+where anyone diagnosing slow playback will look. The alert bar that remains
+floats over the empty strip below the timeline blocks instead of occupying a
+panel, so no message can move the rest of the application again. Requested by
+the user.
