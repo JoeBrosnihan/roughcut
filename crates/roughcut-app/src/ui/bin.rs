@@ -216,7 +216,7 @@ fn recents_menu(
 ) {
     let recents = app.settings.recent_projects.clone();
     ui.add_enabled_ui(!recents.is_empty(), |ui| {
-        ui.menu_button("Open recent", |ui| {
+        ui.menu_button("Recent", |ui| {
             ui.set_min_width(240.0);
             let names: Vec<String> = recents
                 .iter()
