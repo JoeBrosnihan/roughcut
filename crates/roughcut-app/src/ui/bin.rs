@@ -120,6 +120,7 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     let mut recover = false;
     let mut open_recent: Option<std::path::PathBuf> = None;
     let mut clear_recents = false;
+    let mut toggle_proxies: Option<bool> = None;
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.horizontal_centered(|ui| {
@@ -148,6 +149,20 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
                     action = Some(Action::ExportMlt);
                 }
                 ui.separator();
+                // The one setting worth a menu entry: it is the difference
+                // between seeking in 26 ms and seeking in 180 ms, and until
+                // now it could only be reached by editing settings.json.
+                let mut proxies = app.settings.proxies_enabled;
+                if ui
+                    .checkbox(&mut proxies, "Low-res proxies")
+                    .on_hover_text(
+                        "Transcode each clip to 540p in the background and play that                          instead. Seeking becomes roughly seven times faster; the                          cut is always made against the original.",
+                    )
+                    .changed()
+                {
+                    toggle_proxies = Some(proxies);
+                }
+                ui.separator();
                 // Always reachable, so a dismissed startup prompt is never the
                 // last word on a session's work.
                 ui.add_enabled_ui(app.has_recoverable_session(), |ui| {
@@ -169,6 +184,9 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
         });
     });
 
+    if let Some(on) = toggle_proxies {
+        app.set_proxies_enabled(on);
+    }
     if recover {
         app.recover_last_session();
     }

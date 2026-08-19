@@ -36,6 +36,11 @@ const CRF: &str = "18";
 /// running a render.
 pub fn melt_args(project: &Path, out: &Path) -> Vec<std::ffi::OsString> {
     vec![
+        // Without this melt renders in silence and prints two lines of
+        // `Current Position:` when it is already finished. It is the only
+        // thing that makes it emit `Current Frame: N, percentage: P` as it
+        // goes, and therefore the only thing that makes the progress bar move.
+        "-progress".into(),
         project.into(),
         "-consumer".into(),
         format!("avformat:{}", out.display()).into(),
@@ -89,9 +94,9 @@ pub fn to_mp4(
         .with_context(|| format!("cannot run melt at {}", melt.display()))?;
 
     // stderr is drained on a thread of its own so that cancelling never waits
-    // on melt to say something. melt reports on a timer, not per frame, and a
-    // short render can finish without a word; a loop that only checked the
-    // cancel flag between messages would ignore the button entirely.
+    // on melt to say something. Progress arrives on melt's own timer rather
+    // than per frame, so a loop that only checked the cancel flag between
+    // messages would leave the button dead for as long as melt stayed quiet.
     let (tx, rx) = std::sync::mpsc::channel::<Report>();
     let reader = child.stderr.take().map(|stderr| {
         std::thread::Builder::new()
@@ -164,8 +169,8 @@ pub(crate) enum Report {
 /// Turn melt's stderr into a stream of reports.
 ///
 /// Split out from the process handling so it can be tested against a recorded
-/// transcript: melt reports on a timer of its own, which makes proving this
-/// works from a real render a matter of luck and machine load.
+/// transcript, without a render and without a machine fast enough to make one
+/// worth watching.
 ///
 /// melt rewrites its progress line with a carriage return rather than a
 /// newline, so this reads by `\r` as well — reading by lines alone would
@@ -223,11 +228,33 @@ mod tests {
         assert_eq!(parse_progress(""), None);
     }
 
-    /// A transcript in melt's real shape: a banner, then progress lines
-    /// separated by carriage returns rather than newlines, then a summary.
+    /// A transcript recorded from a real render, not written from memory.
+    ///
+    /// That distinction cost a release. The previous version of this test used
+    /// a transcript I composed to match the parser, so it proved the parser
+    /// agreed with my assumption rather than with melt -- and melt says
+    /// nothing at all in this format unless `-progress` is passed, which it
+    /// was not. The bar sat at zero for the whole render.
+    ///
+    /// Captured with:
+    ///
+    ///     melt -progress -profile atsc_1080p_30 color:blue out=1800     ///       -consumer avformat:out.mp4 vcodec=libx264 real_time=-1
     #[test]
-    fn a_melt_transcript_becomes_progress_and_nothing_else_is_lost() {
-        let transcript = "+---------------------------------+\n             |  Consumer Options               |\n             +---------------------------------+\r             Current Frame:          0, percentage:          0\r             Current Frame:         43, percentage:          4\r             Current Frame:        299, percentage:         99\r             Current Frame:        899, percentage:        100\n";
+    fn a_recorded_melt_transcript_becomes_progress_and_nothing_else_is_lost() {
+        let transcript = concat!(
+            "[mp4 @ 000001f7d24917c0] Timestamps are unset in a packet for stream 1.
+",
+            "Current Frame:         34, percentage:          1
+",
+            "Current Frame:         44, percentage:          2
+",
+            "Current Frame:        102, percentage:          5
+",
+            "Current Frame:       1800, percentage:        100
+",
+            "Current Position:       1800
+",
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         pump(std::io::Cursor::new(transcript), &tx);
         drop(tx);
@@ -240,11 +267,12 @@ mod tests {
                 Report::Line(_) => None,
             })
             .collect();
-        assert_eq!(frames, vec![0, 43, 299, 899]);
+        assert_eq!(frames, vec![34, 44, 102, 1800]);
 
-        // The banner is kept, because a failing melt explains itself there.
+        // Everything that is not progress is kept, because a failing melt
+        // explains itself there and nowhere else.
         let lines = got.iter().filter(|r| matches!(r, Report::Line(_))).count();
-        assert_eq!(lines, 3, "the non-progress output was dropped: {got:?}");
+        assert_eq!(lines, 2, "the non-progress output was dropped: {got:?}");
     }
 
     #[test]
@@ -262,10 +290,24 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(joined[0].ends_with("cut.mlt"));
+        // The project is the first thing that is not an option to melt itself.
+        assert!(joined[1].ends_with("cut.mlt"), "{joined:?}");
         assert!(joined.iter().any(|a| a.contains("avformat:") && a.contains("out.mp4")));
         assert!(joined.iter().any(|a| a == "real_time=-1"));
         assert!(joined.iter().any(|a| a == "terminate_on_pause=1"));
         assert!(joined.iter().any(|a| a == "vcodec=libx264"));
+    }
+
+    /// The flag that decides whether the progress bar is a progress bar.
+    /// Without it melt renders in silence and the dialog sits at zero from
+    /// start to finish.
+    #[test]
+    fn melt_is_asked_to_report_progress() {
+        let args = melt_args(Path::new("/p/cut.mlt"), Path::new("/p/out.mp4"));
+        assert_eq!(
+            args.first().map(|a| a.to_string_lossy().into_owned()),
+            Some("-progress".to_string()),
+            "-progress is a melt option and has to come before the project"
+        );
     }
 }

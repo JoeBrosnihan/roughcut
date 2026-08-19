@@ -80,8 +80,6 @@ fn video(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
         );
     }
 
-    skim_frame(app, &painter, rect);
-
     // A thin caption strip so it is always obvious what the monitor is showing.
     let label = match app.focus {
         Focus::Source => app
@@ -119,64 +117,6 @@ fn video(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
             theme::PLAYHEAD,
         );
     }
-}
-
-/// While a seek is in flight, show the frame being seeked to at thumbnail
-/// resolution, over the top of the stale one mpv is still displaying.
-///
-/// Dragging across a long timeline used to move at the rate 4K frames come
-/// out of the decoder, which is a few per second: the picture lags the pointer
-/// by most of a second and skimming is guesswork. The filmstrip sheet already
-/// holds 112 frames of every clip that has been looked at, resident and
-/// indexed by frame — so the right frame, blurry, is available for the cost of
-/// one textured quad, and mpv's sharp one replaces it the moment it lands.
-///
-/// Nothing is drawn unless a real seek is outstanding, so at rest and during
-/// playback this costs nothing and changes nothing.
-fn skim_frame(app: &mut RoughcutApp, painter: &egui::Painter, rect: Rect) {
-    let seeking = app.monitor.is_seeking()
-        || app.scrubbing
-        || app.mark_grab.is_some()
-        || app.trim_drag.is_some();
-    if !seeking {
-        return;
-    }
-    // Which clip, and which frame of it, the playhead is really on.
-    let Some((clip_id, source_frame)) = (match app.focus {
-        Focus::Source => app.selected_clip.map(|id| (id, app.source_frame)),
-        Focus::Timeline => timeline::item_at(&app.project.timeline, app.playhead)
-            .and_then(|(i, offset)| {
-                let item = app.project.timeline.get(i)?;
-                Some((item.clip_id, item.in_frame + offset))
-            }),
-    }) else {
-        return;
-    };
-    // Ask for the sheet if this clip has not got one yet; the next drag over
-    // the same stretch of timeline will have it.
-    app.request_scrub_sheet(clip_id);
-
-    // Posters are deliberately excluded. A one-tile sheet holds a frame from
-    // the middle of the clip, not the frame under the playhead, and showing
-    // that during a scrub would be a confident lie.
-    let Some(thumb) = app.sheets.get(&clip_id).filter(|t| t.tiles > 1) else {
-        return;
-    };
-    let Some(clip) = app.project.clip(clip_id) else {
-        return;
-    };
-    let tile = crate::workers::tile_for_frame(source_frame, clip.duration_frames, thumb.tiles);
-
-    // Letterboxed exactly as mpv letterboxes, so the picture does not jump
-    // when the sharp frame replaces this one.
-    let aspect = thumb.tile_aspect();
-    let (mut w, mut h) = (rect.width(), rect.width() / aspect);
-    if h > rect.height() {
-        h = rect.height();
-        w = h * aspect;
-    }
-    let frame = Rect::from_center_size(rect.center(), egui::vec2(w, h));
-    painter.image(thumb.tex.id(), frame, thumb.uv(tile), egui::Color32::WHITE);
 }
 
 fn placeholder_text(app: &RoughcutApp) -> String {

@@ -2086,6 +2086,10 @@ impl RoughcutApp {
         });
         if let Some(id) = duplicate {
             self.apply_remeasure(id, &path, &info);
+            // A clip already in the bin still needs a proxy if it has not got
+            // one — this is the path every clip takes when a project is opened
+            // and when proxies are switched on.
+            self.request_proxy(id, info);
             return;
         }
         let Some(id) = new_id else {
@@ -2125,6 +2129,44 @@ impl RoughcutApp {
         self.request_proxy(id, info);
     }
 
+    /// Turn 540p proxies on or off for the whole project.
+    ///
+    /// Turning them on re-probes the bin, which is what feeds proxy requests;
+    /// clips that already have a good proxy on disk cost one ffprobe and are
+    /// adopted rather than rebuilt. Turning them off leaves the files alone —
+    /// they are a cache, and the next time this is switched on they are still
+    /// there.
+    pub fn set_proxies_enabled(&mut self, on: bool) {
+        self.settings.proxies_enabled = on;
+        self.settings.save();
+        if !on {
+            self.workers.clear_queue();
+            self.proxy_state.clear();
+            self.set_status("playing the originals", StatusKind::Info);
+            return;
+        }
+        if self
+            .settings
+            .resolve_proxy_dir(self.project_path.as_deref())
+            .is_none()
+        {
+            // Proxies live beside the project, so there has to be a project.
+            self.settings.proxies_enabled = false;
+            self.settings.save();
+            self.set_status(
+                "save the project first, so the proxies have somewhere to live",
+                StatusKind::Warn,
+            );
+            return;
+        }
+        let n = self.project.clips.len();
+        self.revalidate_clips();
+        self.set_status(
+            format!("building proxies for {n} clip(s) — each one speeds up as it lands"),
+            StatusKind::Info,
+        );
+    }
+
     fn request_proxy(&mut self, id: ClipId, info: MediaInfo) {
         if !self.settings.proxies_enabled {
             return;
@@ -2132,6 +2174,15 @@ impl RoughcutApp {
         let Some(clip) = self.project.clip(id) else {
             return;
         };
+        // Already has one, or is already having one made.
+        if clip.proxy_path.as_ref().is_some_and(|p| p.exists())
+            || matches!(
+                self.proxy_state.get(&id),
+                Some(ProxyState::Queued | ProxyState::Running)
+            )
+        {
+            return;
+        }
         let source = clip.path.clone();
         let Some(dir) = self.settings.resolve_proxy_dir(self.project_path.as_deref()) else {
             self.set_status(

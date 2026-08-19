@@ -2,7 +2,6 @@
 
 use crate::app::{Focus, RoughcutApp};
 use crate::theme;
-use crate::ui::truncate_middle;
 use crate::workers;
 use egui::{CornerRadius, Rect, Sense, Stroke, StrokeKind};
 use roughcut_core::model::ClipId;
@@ -609,27 +608,18 @@ fn draw(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, px_per_frame: f32) {
             StrokeKind::Inside,
         );
 
-        // Only label a block that is wide enough to read.
+        // No file name. It is the same name on every block cut from the same
+        // clip, it is already above the monitor for whatever the playhead is
+        // on, and it covers the picture that actually says which shot this is.
         if block.width() > 44.0 {
             let clip = app.project.clip(item.clip_id);
-            let name = clip.map(|c| c.file_name()).unwrap_or_else(|| "?".into());
-            let max_chars = ((block.width() - 10.0) / 6.2).max(3.0) as usize;
             painter.text(
-                block.left_top() + egui::vec2(5.0, 4.0),
-                egui::Align2::LEFT_TOP,
-                truncate_middle(&name, max_chars),
-                egui::FontId::proportional(11.0),
-                theme::TEXT,
+                block.left_bottom() + egui::vec2(5.0, -4.0),
+                egui::Align2::LEFT_BOTTOM,
+                format_timecode(len, fps),
+                egui::FontId::monospace(10.0),
+                theme::TEXT_DIM,
             );
-            if block.width() > 70.0 {
-                painter.text(
-                    block.left_bottom() + egui::vec2(5.0, -4.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    format_timecode(len, fps),
-                    egui::FontId::monospace(10.0),
-                    theme::TEXT_DIM,
-                );
-            }
             if clip.is_some_and(|c| c.rate_mismatch) {
                 painter.text(
                     block.right_top() + egui::vec2(-5.0, 4.0),

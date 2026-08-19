@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 /// Vertical resolution of generated proxies.
 pub const PROXY_HEIGHT: u32 = 540;
 
+/// Frames between keyframes in a proxy — about half a second at any ordinary
+/// rate. Seeking, not file size, is what a proxy is for.
+const GOP: u32 = 15;
+
 pub fn proxy_path(proxy_dir: &Path, id: ClipId) -> PathBuf {
     proxy_dir.join(format!("{id}.mp4"))
 }
@@ -36,6 +40,17 @@ pub fn proxy_args(source: &Path, dest: &Path) -> Vec<std::ffi::OsString> {
         "veryfast".into(),
         "-crf".into(),
         "23".into(),
+        // A keyframe every half second.
+        //
+        // The whole point of a proxy is that landing on an arbitrary frame is
+        // cheap, and an exact seek costs a decode from the preceding keyframe.
+        // x264 would otherwise place them up to 250 frames apart. Source
+        // footage measured here runs about a second between keyframes; half
+        // that, at 540p, is a handful of milliseconds of decoding.
+        "-g".into(),
+        GOP.to_string().into(),
+        "-keyint_min".into(),
+        GOP.to_string().into(),
         "-c:a".into(),
         "aac".into(),
         "-b:a".into(),
@@ -97,6 +112,21 @@ pub fn generate(
     std::fs::create_dir_all(proxy_dir)
         .with_context(|| format!("cannot create proxy directory {}", proxy_dir.display()))?;
     let dest = proxy_path(proxy_dir, clip.id);
+
+    // A proxy that is already there and still matches its source is adopted
+    // rather than rebuilt. Without this, reopening a project re-transcodes
+    // every clip in it — hours of work to arrive back where it started. The
+    // check is the same one a fresh transcode has to pass, so an adopted proxy
+    // is no more trusted than a new one.
+    if dest.is_file() {
+        match probe(ffprobe, &dest) {
+            Ok(existing) if check_proxy(source_info, &existing).is_ok() => return Ok(dest),
+            _ => {
+                log::debug!("discarding stale proxy at {}", dest.display());
+                let _ = std::fs::remove_file(&dest);
+            }
+        }
+    }
 
     let output = quiet_command(ffmpeg)
         .args(proxy_args(&clip.path, &dest))

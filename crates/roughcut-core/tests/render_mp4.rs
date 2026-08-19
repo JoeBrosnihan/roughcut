@@ -175,14 +175,15 @@ fn cancelling_a_render_leaves_no_half_written_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A best-effort check that progress arrives from a real melt.
+/// Progress has to actually arrive from a real melt, or the dialog is a
+/// picture of a progress bar rather than a progress bar.
 ///
-/// Deliberately not an assertion: melt reports on a timer of its own, so
-/// whether a given render ticks at all depends on how loaded the machine is.
-/// The streaming itself is covered deterministically by the unit tests against
-/// a recorded transcript; this only reports what really happened.
+/// This was previously a best-effort check that only reported what it saw,
+/// because melt appeared to render in silence. It did: `-progress` was
+/// missing from the command line, and the softened test is what allowed that
+/// to ship. It asserts again.
 #[test]
-fn a_real_render_is_watched_for_progress() {
+fn a_real_render_reports_progress() {
     let tools = Tools::discover();
     let (Some(ffmpeg), Some(ffprobe)) = (tools.ffmpeg.clone(), tools.ffprobe.clone()) else {
         eprintln!("SKIPPED: ffmpeg and ffprobe are required");
@@ -208,13 +209,12 @@ fn a_real_render_is_watched_for_progress() {
     let mut seen = Vec::new();
     render::to_mp4(&melt, &mlt_path, &out, &cancel, |f| seen.push(f)).expect("render failed");
 
-    if seen.is_empty() {
-        eprintln!("INCONCLUSIVE: melt finished this render without reporting progress");
-    } else {
-        // Whatever did arrive has to make sense.
-        assert!(seen.windows(2).all(|w| w[0] <= w[1]), "went backwards: {seen:?}");
-        assert!(seen.iter().all(|&f| f <= 900), "past the end: {seen:?}");
-    }
+    assert!(
+        seen.iter().any(|&f| f > 0),
+        "melt reported no progress, so the bar would never move: {seen:?}"
+    );
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "went backwards: {seen:?}");
+    assert!(seen.iter().all(|&f| f <= 900), "past the end: {seen:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
