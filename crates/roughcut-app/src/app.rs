@@ -2392,6 +2392,7 @@ impl RoughcutApp {
             duration_frames: clip.duration_frames,
             fps: self.project.fps(),
             tiles,
+            still: clip.still,
             cache_dir: crate::settings::thumb_cache_dir(),
         });
     }

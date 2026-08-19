@@ -31,17 +31,28 @@ fn wait_loaded(player: &Player, secs: u64) -> bool {
 
 fn main() -> anyhow::Result<()> {
     let files: Vec<PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
-    anyhow::ensure!(files.len() == 2, "usage: still_probe <video> <image>");
-    let (video, image) = (&files[0], &files[1]);
-
+    anyhow::ensure!(!files.is_empty(), "usage: still_probe <image> | <video> <image>");
     let lib = Arc::new(MpvLib::load()?);
+
+    // One argument: load it the way the source monitor does, on its own, and
+    // report whether mpv produces a picture at all.
+    if files.len() == 1 {
+        return direct(&lib, &files[0]);
+    }
+    let (video, image) = (&files[0], &files[1]);
 
     // Three seconds of video, then ten seconds of photo, then three more of
     // video: a still in the middle of a cut, which is the case that has to
     // work.
     let parts = [
         (video.clone(), 0.0_f64, 3.0_f64),
-        (image.clone(), 0.0, 10.0),
+        // Deliberately not starting at zero. A photo that has been trimmed
+        // on the timeline has an in point, and the EDL quotes it.
+        (
+            image.clone(),
+            std::env::var("STILL_START").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            10.0,
+        ),
         (video.clone(), 3.0, 3.0),
     ];
     let expected: f64 = parts.iter().map(|p| p.2).sum();
@@ -113,6 +124,36 @@ fn main() -> anyhow::Result<()> {
             println!("RESULT: the still plays for its full length, in line with the video")
         }
         None => println!("RESULT: playback ended early, at {furthest:.3} s"),
+    }
+    Ok(())
+}
+
+/// Load one file exactly as the source monitor does, and report what mpv makes
+/// of it: whether it loads, what duration it claims, and whether a frame is
+/// actually decoded.
+fn direct(lib: &Arc<MpvLib>, path: &std::path::Path) -> anyhow::Result<()> {
+    let player = Player::new(lib.clone())?;
+    player.set_option("vo", "null")?;
+    if !wait_loaded_after(&player, path) {
+        println!("RESULT: {} never loaded", path.display());
+        return Ok(());
+    }
+    println!(
+        "duration {:?}  size {:?}x{:?}",
+        player.get_f64("duration"),
+        player.get_f64("width"),
+        player.get_f64("height")
+    );
+    // The monitor seeks to the playhead the moment the file is open.
+    for target in [0.0_f64, 5.0, 29.97] {
+        player.seek_exact(target)?;
+        std::thread::sleep(Duration::from_millis(300));
+        while player.poll_event().is_some() {}
+        println!(
+            "  after seek to {target:>6.2} s: time-pos {:?}  eof {:?}",
+            player.get_f64("time-pos"),
+            player.get_flag("eof-reached")
+        );
     }
     Ok(())
 }

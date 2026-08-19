@@ -84,6 +84,8 @@ pub enum Job {
         duration_frames: i64,
         fps: Rational,
         tiles: usize,
+        /// A photograph: one frame, at the start, and no seeking to reach it.
+        still: bool,
         /// Where finished sheets are kept between sessions. `None` disables
         /// caching, which only happens if there is nowhere to write.
         cache_dir: Option<PathBuf>,
@@ -367,6 +369,7 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             duration_frames,
             fps,
             tiles,
+            still,
             cache_dir,
         } => {
             let result = match &shared.tools.ffmpeg {
@@ -375,7 +378,8 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                     &path,
                     duration_frames,
                     fps,
-                    tiles,
+                    if still { 1 } else { tiles },
+                    still,
                     cache_dir.as_deref(),
                 ),
                 None => Err(anyhow::anyhow!("ffmpeg is not available")),
@@ -564,6 +568,7 @@ fn make_sheet(
     duration_frames: i64,
     fps: Rational,
     tiles: usize,
+    still: bool,
     cache_dir: Option<&std::path::Path>,
 ) -> Result<Sheet> {
     let tiles = tiles.max(1);
@@ -575,9 +580,18 @@ fn make_sheet(
         }
     }
 
-    let frames: Vec<i64> = (0..tiles)
-        .map(|i| filmstrip_frame(i, duration_frames, tiles))
-        .collect();
+    // A photograph holds one frame, at the start, however long the project
+    // says it lasts. Sampling the middle of its invented duration — which is
+    // what every other clip wants — asks ffmpeg to seek thirty seconds into a
+    // single image, and it answers with nothing at all, silently and with a
+    // successful exit code.
+    let frames: Vec<i64> = if still {
+        vec![0]
+    } else {
+        (0..tiles)
+            .map(|i| filmstrip_frame(i, duration_frames, tiles))
+            .collect()
+    };
 
     // Each batch is one ffmpeg run producing a horizontal strip; the strips
     // are then cut up and packed into the grid. One launch per tile — which is
@@ -875,6 +889,7 @@ mod tests {
             duration_frames: 100,
             fps: Rational::new(30, 1),
             tiles: 1,
+            still: false,
             cache_dir: None,
         };
         let sheet = Job::Thumbs {
@@ -883,6 +898,7 @@ mod tests {
             duration_frames: 100,
             fps: Rational::new(30, 1),
             tiles: SCRUB_TILES,
+            still: false,
             cache_dir: None,
         };
         assert_eq!(poster.priority(), Priority::High);
@@ -943,6 +959,50 @@ mod tests {
         // stale peaks are never served.
         std::fs::write(&clip, b"not a video any more").unwrap();
         assert!(make_waveform(std::path::Path::new("no-such-ffmpeg"), &clip, Some(&dir)).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A photograph gets a picture in the bin.
+    ///
+    /// It did not, and the way it failed is the interesting part: a still is
+    /// given an artificial minute of duration, the poster is sampled from the
+    /// middle of a clip, and asking ffmpeg for the frame thirty seconds into a
+    /// single image produces an empty stream and exit code zero. Nothing
+    /// errored; the bin simply stayed grey.
+    #[test]
+    fn a_photograph_gets_a_poster_from_its_only_frame() {
+        let Some(ffmpeg) = Tools::discover().ffmpeg else {
+            eprintln!("SKIPPED: ffmpeg is required");
+            return;
+        };
+        let dir = std::env::temp_dir().join("roughcut-still-poster-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("photo.png");
+        assert!(quiet_command(&ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x480:d=1"])
+            .args(["-frames:v", "1"])
+            .arg(&png)
+            .status()
+            .expect("cannot run ffmpeg")
+            .success());
+
+        // An hour of invented duration, exactly as a real still is given.
+        let sheet = make_sheet(&ffmpeg, &png, 1800, Rational::new(30, 1), 1, true, None)
+            .expect("a photograph must produce a poster");
+        assert_eq!(sheet.tiles, 1);
+        assert!(sheet.width > 0 && sheet.height > 0);
+        assert!(
+            sheet.rgba.iter().any(|&b| b != 0),
+            "the poster came back blank"
+        );
+
+        // And the same call without the flag is the bug, still reproducible.
+        assert!(
+            make_sheet(&ffmpeg, &png, 1800, Rational::new(30, 1), 1, false, None).is_err(),
+            "seeking into a single image should fail rather than quietly work"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
