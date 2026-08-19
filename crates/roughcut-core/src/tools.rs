@@ -133,14 +133,28 @@ pub const MEDIA_EXTENSIONS: &[&str] = &[
     "mpeg", "vob", "3gp", "braw", "r3d", "dv", "ogv",
 ];
 
-pub fn is_media_file(path: &Path) -> bool {
+/// Photographs, which a trip or an event produces alongside the video and
+/// which belong in the same cut.
+///
+/// Recognised by extension rather than by what ffprobe says. A HEIC is an
+/// HEVC frame in an MP4-family container, so by codec it is indistinguishable
+/// from a video; by name it is unambiguous.
+pub const STILL_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "heic", "heif", "webp", "bmp", "tif", "tiff"];
+
+fn has_extension(path: &Path, list: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| {
-            let lower = e.to_ascii_lowercase();
-            MEDIA_EXTENSIONS.contains(&lower.as_str())
-        })
+        .map(|e| list.contains(&e.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+/// A photograph rather than footage: no duration of its own, and given one.
+pub fn is_still_image(path: &Path) -> bool {
+    has_extension(path, STILL_EXTENSIONS)
+}
+
+pub fn is_media_file(path: &Path) -> bool {
+    has_extension(path, MEDIA_EXTENSIONS) || is_still_image(path)
 }
 
 /// Expand a dropped path into importable files. Folders recurse exactly one

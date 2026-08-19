@@ -168,6 +168,7 @@ mod tests {
             video_index: 0,
             audio_index: 1,
             has_audio: true,
+            still: false,
         }
     }
 

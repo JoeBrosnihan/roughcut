@@ -98,6 +98,12 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceClip {
     pub id: ClipId,
+    /// A photograph rather than footage. Its duration is invented rather than
+    /// measured, it has no audio and no proxy, and it exports through a
+    /// different MLT producer. Absent from projects written before photos
+    /// were supported, which is what the default is for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub still: bool,
     /// Absolute path to the ORIGINAL file. Never a proxy.
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]

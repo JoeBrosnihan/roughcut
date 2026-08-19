@@ -395,6 +395,7 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                     // `generate` only needs the id and path off the clip.
                     let stub = roughcut_core::model::SourceClip {
                         id: clip_id,
+                        still: false,
                         path: source,
                         proxy_path: None,
                         duration_frames: info.native_frames,

@@ -48,7 +48,14 @@ pub const RATE_CAP: Rational = Rational::new(60, 1);
 ///
 /// Returns `None` for an empty set.
 pub fn suggest<'a>(clips: impl IntoIterator<Item = &'a SourceClip>) -> Option<Profile> {
-    let clips: Vec<&SourceClip> = clips.into_iter().collect();
+    // Photographs are excluded. A 12-megapixel 4:3 still is not evidence
+    // about what shape the video should be, and it has no frame rate at all —
+    // letting one vote would let a single holiday snap decide the export.
+    let all: Vec<&SourceClip> = clips.into_iter().collect();
+    let footage: Vec<&SourceClip> = all.iter().copied().filter(|c| !c.still).collect();
+    // Unless photographs are all there is, in which case their shape is the
+    // only information available.
+    let clips = if footage.is_empty() { all } else { footage };
     if clips.is_empty() {
         return None;
     }
@@ -270,6 +277,7 @@ mod tests {
             video_index: 0,
             audio_index: 1,
             has_audio: true,
+            still: false,
         }
     }
 

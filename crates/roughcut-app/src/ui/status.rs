@@ -1,4 +1,4 @@
-//! The alert bar.
+//! The notification tray.
 //!
 //! There is deliberately no permanent status readout. §8 specified one
 //! (timecode, frame, fps, clip count) but every field in it is either already
@@ -7,65 +7,96 @@
 //! for the life of the project. A row of chrome that never changes is a row of
 //! pixels not showing video.
 //!
-//! What is left is exceptional information only: warnings that must stay
-//! visible (§4's missing ffprobe) and the result of the last action. When
-//! there is nothing to say, nothing is drawn at all.
+//! What is left is exceptional information only: standing warnings that must
+//! stay visible until the condition behind them clears, and the result of the
+//! last few actions, which fade.
 //!
-//! It floats over the bottom of the window rather than occupying a panel of
-//! its own. A panel that appears and disappears reflows everything above it,
-//! so a message that lasts three seconds moved the video, the bin and the
-//! timeline twice — and a bar that jiggles the application is worse than the
-//! information it carries.
+//! They float in the top right corner rather than occupying a panel. A panel
+//! that takes height only when it has something to say reflows everything
+//! above it, so a message lasting five seconds moved the video, the bin and
+//! the timeline twice — and an application that jiggles is worse than the
+//! information that made it jiggle. Overlaying costs nothing but a corner of
+//! the picture, and only while there is something to read.
 
 use crate::app::{RoughcutApp, StatusKind};
 use crate::theme;
 
+/// Wide enough for a path, narrow enough to leave the picture visible.
+const WIDTH: f32 = 320.0;
+
 pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
     let warnings = standing_warnings(app);
-    if warnings.is_empty() && app.status.is_none() {
+    if warnings.is_empty() && app.toasts.is_empty() {
         return;
     }
 
-    // Bottom left, over the empty strip below the timeline blocks: the one
-    // place in the window where nothing is ever drawn.
-    egui::Area::new(egui::Id::new("alerts"))
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
+    // Newest at the top, so the thing that just happened is where the eye
+    // already is; standing warnings sit below them, because they are context
+    // rather than news.
+    let mut dismiss: Option<usize> = None;
+    egui::Area::new(egui::Id::new("toasts"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::PANEL_ALT)
-                .stroke(egui::Stroke::new(1.0, theme::LINE))
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 10.0;
-
-                        for warning in &warnings {
-                            ui.label(egui::RichText::new(warning).color(theme::WARN));
-                            sep(ui);
-                        }
-                        if let Some((text, kind, _)) = &app.status {
-                            let color = match kind {
-                                StatusKind::Info => theme::TEXT_DIM,
-                                StatusKind::Warn => theme::WARN,
-                                StatusKind::Error => theme::ERROR,
-                            };
-                            ui.label(egui::RichText::new(text).color(color));
-                        }
-
-                        // Dismiss the transient message; standing warnings
-                        // persist until the condition behind them clears.
-                        if app.status.is_some()
-                            && ui
-                                .add(egui::Button::new("×").frame(false))
-                                .on_hover_text("dismiss")
-                                .clicked()
-                        {
-                            app.status = None;
-                        }
-                    });
-                });
+            ui.set_max_width(WIDTH);
+            for (i, toast) in app.toasts.iter().enumerate().rev() {
+                if toast_card(ui, &toast.text, colour(toast.kind), true) {
+                    dismiss = Some(i);
+                }
+            }
+            for warning in &warnings {
+                toast_card(ui, warning, theme::WARN, false);
+            }
         });
+
+    if let Some(i) = dismiss {
+        app.toasts.remove(i);
+    }
+}
+
+fn colour(kind: StatusKind) -> egui::Color32 {
+    match kind {
+        StatusKind::Info => theme::TEXT,
+        StatusKind::Warn => theme::WARN,
+        StatusKind::Error => theme::ERROR,
+    }
+}
+
+/// One card. Returns true if it was clicked, which dismisses it.
+///
+/// The whole card is the dismiss target rather than a small ×: it is a
+/// notification, not a dialog, and there is nothing else it could mean.
+fn toast_card(ui: &mut egui::Ui, text: &str, colour: egui::Color32, dismissable: bool) -> bool {
+    let mut clicked = false;
+    egui::Frame::new()
+        .fill(theme::PANEL_ALT)
+        // A left edge in the message's own colour, so severity is readable
+        // before the words are.
+        .stroke(egui::Stroke::new(1.0, theme::LINE))
+        .inner_margin(egui::Margin::symmetric(9, 6))
+        .outer_margin(egui::Margin {
+            bottom: 6,
+            ..Default::default()
+        })
+        .show(ui, |ui| {
+            ui.set_width(WIDTH - 18.0);
+            let response = ui.add(
+                egui::Label::new(egui::RichText::new(text).size(11.5).color(colour))
+                    .wrap()
+                    .sense(if dismissable {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::hover()
+                    }),
+            );
+            if dismissable {
+                if response.clicked() {
+                    clicked = true;
+                }
+                response.on_hover_text("dismiss");
+            }
+        });
+    clicked
 }
 
 /// Conditions the user needs to keep seeing, not a transient message.
@@ -80,8 +111,8 @@ fn standing_warnings(app: &RoughcutApp) -> Vec<String> {
     // Software decoding is deliberately *not* reported. §3 asked for it, but
     // `hwdec-current` is unset until mpv has actually built the decoder, so
     // the notice appeared on every single clip load and was wrong nearly every
-    // time. It is logged at startup instead, where it can be read once by
-    // whoever is diagnosing slow playback. See docs/deviations.md.
+    // time. It is logged instead, where it can be read once by whoever is
+    // diagnosing slow playback. See docs/deviations.md.
     if app
         .video
         .lock()
@@ -95,8 +126,4 @@ fn standing_warnings(app: &RoughcutApp) -> Vec<String> {
         out.push(format!("{} missing file(s)", app.missing_media.len()));
     }
     out
-}
-
-fn sep(ui: &mut egui::Ui) {
-    ui.label(egui::RichText::new("·").color(theme::LINE));
 }

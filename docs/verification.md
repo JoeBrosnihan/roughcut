@@ -1,6 +1,6 @@
 # Verification
 
-`cargo test --workspace` — 89 tests, no warnings, clippy clean on Windows and
+`cargo test --workspace` — 159 tests, no warnings, clippy clean on Windows and
 type-checking clean on both macOS targets.
 
 ## Frame accuracy
@@ -69,7 +69,7 @@ exit.
 | Step backward one frame, via 540p proxy | < 33 ms | **26.3 ms** median |
 | Seek to arbitrary frame, 4K H.264 | < 200 ms | **180 ms** median, 342 ms worst |
 | RSS, 50 clips imported with thumbnails | < 300 MB | **258 MB** |
-| Hardware decode | Mandatory | **nvdec**, reported in the alert bar when absent |
+| Hardware decode | Mandatory | **nvdec**; logged, not shown — see [deviations.md](deviations.md) |
 
 Two need explanation:
 
@@ -85,9 +85,12 @@ Two need explanation:
 
 ## Known gaps
 
-- **Proxies have no UI toggle.** `proxies_enabled` can only be set by editing
-  `settings.json` by hand, so the whole proxy subsystem is currently
-  unreachable from the application.
+- **Photograph playback is verified below mpv, not through the interface.**
+  `cargo run -p roughcut-mpv --example still_probe -- clip.mov photo.heic`
+  shows that mpv holds a still in an EDL for exactly the length it is given,
+  and `stills_in_the_cut.rs` shows that a cut containing one renders to the
+  right number of frames. What has not been watched is the playhead crossing a
+  photograph in the running application.
 - **`J` shuttle speeds are aspirational on heavy media.** Reverse playback is
   timer-driven backward seeks; at 180 ms each on 4K, even 1× cannot keep up, so
   the `8x` indicator does not mean what it says. It is honest on 1080p and on

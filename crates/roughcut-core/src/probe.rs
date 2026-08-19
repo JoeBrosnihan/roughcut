@@ -39,6 +39,10 @@ pub struct MediaInfo {
     /// `-1` when the file has no audio.
     pub audio_index: i32,
     pub has_audio: bool,
+    /// A photograph. It has a size but no duration and no real frame rate, so
+    /// the two are supplied by the project rather than measured — see
+    /// `import::add_clip`.
+    pub still: bool,
 }
 
 impl MediaInfo {
@@ -82,11 +86,21 @@ pub fn probe(ffprobe: &Path, path: &Path) -> Result<MediaInfo> {
     }
     let json: Value = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("ffprobe produced unparseable JSON for {}", path.display()))?;
-    parse_probe_json(&json).with_context(|| format!("cannot use {}", path.display()))
+    parse_still_or_clip(&json, crate::tools::is_still_image(path))
+        .with_context(|| format!("cannot use {}", path.display()))
 }
 
 /// Split out from `probe` so it can be unit tested without an ffprobe binary.
 pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
+    parse_still_or_clip(json, false)
+}
+
+/// As `parse_probe_json`, but told whether the file is a photograph.
+///
+/// A still has to be recognised before the timing is read, not after: ffprobe
+/// reports no duration and no frame count for one, and a nominal 25/1 rate it
+/// invented, so the ordinary path rejects it outright.
+pub fn parse_still_or_clip(json: &Value, still: bool) -> Result<MediaInfo> {
     let streams = json
         .get("streams")
         .and_then(Value::as_array)
@@ -127,21 +141,33 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
 
     // `r_frame_rate` is the real (constant) rate; `avg_frame_rate` is an
     // average that lies on files with a trailing partial frame.
-    let fps = video
-        .get("r_frame_rate")
-        .and_then(Value::as_str)
-        .and_then(parse_ratio)
-        .or_else(|| {
-            video
-                .get("avg_frame_rate")
-                .and_then(Value::as_str)
-                .and_then(parse_ratio)
-        })
-        .filter(|r| r.num > 0 && r.den > 0)
-        .ok_or_else(|| anyhow!("video stream has no usable frame rate"))?
-        .reduced();
+    let fps = if still {
+        // Whatever ffprobe says here is fiction — a PNG reports 25/1. The
+        // project supplies the real one when the clip is added.
+        Rational::new(1, 1)
+    } else {
+        video
+            .get("r_frame_rate")
+            .and_then(Value::as_str)
+            .and_then(parse_ratio)
+            .or_else(|| {
+                video
+                    .get("avg_frame_rate")
+                    .and_then(Value::as_str)
+                    .and_then(parse_ratio)
+            })
+            .filter(|r| r.num > 0 && r.den > 0)
+            .ok_or_else(|| anyhow!("video stream has no usable frame rate"))?
+            .reduced()
+    };
 
-    let (native_frames, variable_rate) = frame_count(video, json, fps)?;
+    let (native_frames, variable_rate) = if still {
+        // Zero, meaning "not measured". A photograph lasts as long as it is
+        // given, and only the project knows the rate to express that in.
+        (0, false)
+    } else {
+        frame_count(video, json, fps)?
+    };
 
     let (sar_n, sar_d) = video
         .get("sample_aspect_ratio")
@@ -194,6 +220,7 @@ pub fn parse_probe_json(json: &Value) -> Result<MediaInfo> {
         video_index,
         audio_index,
         has_audio: audio.is_some(),
+        still,
     })
 }
 

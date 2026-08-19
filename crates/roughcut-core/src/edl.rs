@@ -104,6 +104,7 @@ mod tests {
         for path in paths {
             p.clips.push(SourceClip {
                 id: ClipId::new(),
+                still: false,
                 path: PathBuf::from(path),
                 proxy_path: None,
                 duration_frames: 300,

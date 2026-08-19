@@ -225,6 +225,7 @@ mod tests {
         let mut p = Project::new();
         p.clips.push(SourceClip {
             id: ClipId::new(),
+            still: false,
             path: PathBuf::from("/media/one.mp4"),
             proxy_path: None,
             duration_frames: 300,

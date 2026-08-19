@@ -2,9 +2,9 @@
 
 Assemble a rough cut fast, then finish it in Shotcut.
 
-Point Roughcut at a folder of video, skim it, mark the good bits, and build an
-ordered sequence. Export a `.mlt` project that Shotcut opens with every cut
-exactly where you put it.
+Point Roughcut at a folder of video and photos, skim it, mark the good bits,
+and build an ordered sequence. Export a `.mlt` project that Shotcut opens with
+every cut exactly where you put it.
 
 It is deliberately small: no effects, transitions, audio mixing, titles, or a
 second video track. Those are Shotcut's job — this is the part before them,

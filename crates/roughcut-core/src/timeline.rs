@@ -289,6 +289,7 @@ mod tests {
         let id = ClipId::new();
         project.clips.push(SourceClip {
             id,
+            still: false,
             path: PathBuf::from(format!("/tmp/{id}.mp4")),
             proxy_path: None,
             duration_frames: frames,

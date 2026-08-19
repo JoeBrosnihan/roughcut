@@ -130,22 +130,38 @@ pub fn to_xml(project: &Project, opts: &ExportOptions) -> Result<String> {
             .context("bin clip vanished during export")?;
         let len = clip.duration_frames.max(1);
 
-        let mut chain = BytesStart::new("chain");
-        chain.push_attribute(("id", chain_id.as_str()));
-        chain.push_attribute(("out", fmt(len - 1).as_str()));
-        w.write_event(Event::Start(chain))?;
+        // A photograph is not a chain. `avformat` would read it as a stream
+        // of exactly one frame and refuse to hold it for the length asked
+        // for; MLT's image producer exists for precisely this, and is what
+        // Shotcut writes for a still as well.
+        let tag = if clip.still { "producer" } else { "chain" };
+
+        let mut element = BytesStart::new(tag);
+        element.push_attribute(("id", chain_id.as_str()));
+        element.push_attribute(("out", fmt(len - 1).as_str()));
+        w.write_event(Event::Start(element))?;
 
         prop(&mut w, "length", &fmt(len))?;
         prop(&mut w, "eof", "pause")?;
         prop(&mut w, "resource", &absolute_resource(&clip.path))?;
-        prop(&mut w, "mlt_service", "avformat-novalidate")?;
-        prop(&mut w, "seekable", "1")?;
-        prop(&mut w, "audio_index", &clip.audio_index.to_string())?;
-        prop(&mut w, "video_index", &clip.video_index.to_string())?;
-        prop(&mut w, "mute_on_pause", "0")?;
+        if clip.still {
+            prop(&mut w, "mlt_service", "qimage")?;
+            // One frame per frame: `ttl` is how many frames each picture in a
+            // sequence is held for, and a single photo is a sequence of one.
+            prop(&mut w, "ttl", "1")?;
+            prop(&mut w, "aspect_ratio", "1")?;
+            prop(&mut w, "progressive", "1")?;
+            prop(&mut w, "seekable", "1")?;
+        } else {
+            prop(&mut w, "mlt_service", "avformat-novalidate")?;
+            prop(&mut w, "seekable", "1")?;
+            prop(&mut w, "audio_index", &clip.audio_index.to_string())?;
+            prop(&mut w, "video_index", &clip.video_index.to_string())?;
+            prop(&mut w, "mute_on_pause", "0")?;
+        }
         prop(&mut w, "shotcut:caption", &clip.file_name())?;
 
-        w.write_event(Event::End(BytesEnd::new("chain")))?;
+        w.write_event(Event::End(BytesEnd::new(tag)))?;
     }
 
     // --- the bin ------------------------------------------------------------
@@ -351,6 +367,7 @@ mod tests {
             clips: vec![
                 SourceClip {
                     id: a,
+                    still: false,
                     path: PathBuf::from(if cfg!(windows) {
                         r"C:\media\a.mp4"
                     } else {
@@ -378,6 +395,7 @@ mod tests {
                 },
                 SourceClip {
                     id: b,
+                    still: false,
                     path: PathBuf::from(if cfg!(windows) {
                         r"C:\media\b & c.mp4"
                     } else {

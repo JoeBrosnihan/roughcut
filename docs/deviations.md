@@ -82,3 +82,18 @@ where anyone diagnosing slow playback will look. The alert bar that remains
 floats over the empty strip below the timeline blocks instead of occupying a
 panel, so no message can move the rest of the application again. Requested by
 the user.
+
+**14. Photographs are importable, which the brief never mentioned.** §9 assumes
+every clip is footage with a measured duration. A still has none: ffprobe
+reports no frame count, no real frame rate, and a nominal 25/1 it invented. It
+is therefore the one thing in the bin whose length is decided rather than
+measured — ten seconds, marked on arrival, in a clip an artificial minute long
+so the timeline edge has something to drag against.
+
+Nothing else in the model needed a special case. The still is expressed in
+profile frames like everything else, so timeline arithmetic, marking and the
+EDL are unchanged. Only three places know: the MLT writer emits MLT's image
+producer rather than an `avformat` chain, no proxy or scrub sheet is built for
+one, and playback carries the playhead across it on wall clock, because mpv
+reports no position at all while it holds a single frame. Requested by the
+user. See [timing.md](timing.md).

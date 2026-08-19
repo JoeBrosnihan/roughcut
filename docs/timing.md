@@ -139,22 +139,55 @@ clip measured here peaks at **-39.2 dBFS**, so scaling to full scale would have
 drawn it as a flat line, while scaling with no floor at all would draw room
 tone as though it were a conversation.
 
-## Skimming shows a blurry frame before a sharp one
+## Why there is no low-resolution stand-in while seeking
 
-Dragging across a long timeline used to move at the rate 4K frames come out of
-the decoder — a few per second — so the picture lagged the pointer by most of a
-second. While a seek is outstanding the monitor now draws the frame being
-sought from the scrub sheet, which is already resident and already indexed by
-frame; mpv's sharp frame replaces it the moment it lands.
+There was, briefly. While a seek was outstanding the monitor drew the frame
+being sought from the scrub sheet, on the theory that a blurry frame now beats
+a sharp one later. It was removed the day it shipped, because the frame it drew
+was the wrong one: a sheet holds 112 samples of a clip, so on anything longer
+than a minute the nearest tile is *seconds* from the playhead. A confident
+picture of the wrong moment is worse than a stale picture of the right one.
 
-It costs one textured quad and no decoding. Nothing is drawn unless a real seek
-is in flight, so at rest and during playback this changes nothing. Frame steps
-are deliberately excluded — they land within a frame or two, and treating them
-as in flight would flash a placeholder on every arrow key.
+The real answer is a low-resolution decode at the actual position, which is
+what a proxy is. Seeking a 540p proxy was measured at 26 ms against 180 ms on
+4K — see [verification.md](verification.md) — and proxies are now reachable
+from the File menu rather than only from `settings.json`.
 
-This is a stopgap for not having proxies turned on, not a replacement for them:
-the tiles are 96 px wide. Proxies remain the real answer, and the measurements
-in [verification.md](verification.md) say why.
+Keyframe-only seeking was considered as a cheaper middle ground and rejected on
+measurement: keyframes in the phone footage here land about a second apart,
+which is twice the error anyone would accept from a scrub.
+
+## A photograph has no duration, so it is given one
+
+Everything else in the bin is measured. A still is not: ffprobe reports no
+frame count, no duration, and a frame rate it made up — a PNG comes back as
+25/1. So `import::add_clip` supplies both. The clip takes the project's rate,
+is made an artificial **60 seconds** long, and arrives with the first **10
+seconds** already marked, which is what `A` appends. The minute is not
+arbitrary: an edge drag has to have something to drag against, and a still with
+no footage behind it would otherwise be the one clip in the project that can be
+stretched without limit.
+
+Past that point nothing knows it is a photograph. The length is in profile
+frames like every other length, so marking, timeline arithmetic and the EDL are
+unchanged. Three places do know:
+
+- **The MLT writer** emits MLT's image producer, not an `avformat` chain.
+  `avformat` reads a photo as a stream of exactly one frame and will not hold
+  it. Verified end to end: a cut of 90 frames of video, 60 of photo and 30 more
+  of video renders to exactly 180 frames.
+- **No proxy and no scrub sheet** is built for one. There is nothing to
+  transcode and every tile would be the same picture.
+- **Playback carries the playhead across it on wall clock.** mpv holds the
+  still for exactly the length the EDL gives it — measured to the frame — but
+  reports no `time-pos` at all while it does, because there is no new frame to
+  timestamp. Left alone, the playhead would freeze for ten seconds and then
+  jump. Whole frames only, remainder carried, so it cannot drift.
+
+PNG, JPEG and HEIC were all checked through ffmpeg, melt and mpv. HEIC is worth
+naming because it is what phones actually produce, and because by codec it is
+indistinguishable from video — it is an HEVC frame in an MP4-family container.
+Stills are therefore recognised by extension, which is unambiguous.
 
 ## Variable frame rate
 

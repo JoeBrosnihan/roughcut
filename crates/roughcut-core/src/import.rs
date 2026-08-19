@@ -19,6 +19,25 @@ pub enum ImportOutcome {
 /// while nothing has been marked or assembled. Once it holds still, a clip at
 /// a different rate is accepted as-is and flagged, because MLT will resample
 /// it and frame-exactness for that clip is no longer guaranteed.
+/// How long a photograph lasts once it is on the timeline.
+///
+/// Ten seconds is long enough to look at and short enough to trim down, and
+/// trimming is exactly what the timeline edges are for.
+pub const STILL_SECONDS: i64 = 10;
+
+/// The most a photograph can be stretched to by retrimming.
+///
+/// A still has no footage behind it, so something has to bound the edge drag.
+/// A minute is far more than a rough cut ever holds one for, and keeping it
+/// finite means every clip in the project still obeys the same rule: you can
+/// never trim past the end of what you have.
+pub const STILL_MAX_SECONDS: i64 = 60;
+
+/// Frames in `seconds` of project time, rounded to whole frames.
+fn seconds_to_frames(seconds: i64, fps: crate::time::Rational) -> i64 {
+    ((seconds * fps.num) as f64 / fps.den as f64).round() as i64
+}
+
 pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportOutcome {
     let path = absolutise(path);
 
@@ -27,14 +46,39 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
     }
 
     let profile_fps = project.fps();
-    let native_fps = info.fps.reduced();
-    let rate_mismatch = native_fps != profile_fps;
-    // Durations live in profile time so every position in the app is directly
-    // comparable, whatever the source rate was.
-    let duration_frames = if rate_mismatch {
-        convert_frames(info.native_frames, native_fps, profile_fps)
+
+    // A photograph has no rate and no length of its own, so it takes the
+    // project's rate and is given a length. Nothing downstream then has to
+    // know it is a photograph in order to do arithmetic about it.
+    let (native_fps, rate_mismatch, duration_frames) = if info.still {
+        (
+            profile_fps,
+            false,
+            seconds_to_frames(STILL_MAX_SECONDS, profile_fps),
+        )
     } else {
-        info.native_frames
+        let native_fps = info.fps.reduced();
+        let mismatch = native_fps != profile_fps;
+        // Durations live in profile time so every position in the app is
+        // directly comparable, whatever the source rate was.
+        let frames = if mismatch {
+            convert_frames(info.native_frames, native_fps, profile_fps)
+        } else {
+            info.native_frames
+        };
+        (native_fps, mismatch, frames)
+    };
+
+    // A photo arrives already marked, because the answer to "how much of this
+    // do you want" is the same every time and typing it out for each one is
+    // not editing.
+    let (mark_in, mark_out) = if info.still {
+        (
+            Some(0),
+            Some(seconds_to_frames(STILL_SECONDS, profile_fps) - 1),
+        )
+    } else {
+        (None, None)
     };
 
     let id = ClipId::new();
@@ -42,8 +86,13 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         id,
         path,
         proxy_path: None,
+        still: info.still,
         duration_frames: duration_frames.max(1),
-        native_frames: info.native_frames.max(1),
+        native_frames: if info.still {
+            duration_frames.max(1)
+        } else {
+            info.native_frames.max(1)
+        },
         native_fps_num: native_fps.num,
         native_fps_den: native_fps.den,
         width: info.width,
@@ -55,8 +104,8 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         has_audio: info.has_audio,
         video_index: info.video_index,
         audio_index: info.audio_index,
-        mark_in: None,
-        mark_out: None,
+        mark_in,
+        mark_out,
         rate_mismatch,
         variable_rate: info.variable_rate,
         flagged: false,
@@ -188,6 +237,7 @@ mod tests {
             video_index: 0,
             audio_index: 1,
             has_audio: true,
+            still: false,
         }
     }
 

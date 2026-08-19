@@ -146,6 +146,17 @@ pub enum StatusKind {
     Error,
 }
 
+/// One notification in the tray.
+pub struct Toast {
+    pub text: String,
+    pub kind: StatusKind,
+    pub at: std::time::Instant,
+}
+
+/// Beyond this many, the oldest is dropped. A stack tall enough to cover the
+/// picture is a stack nobody reads.
+const MAX_TOASTS: usize = 4;
+
 /// The five marking operations. An enum rather than a pair of booleans, so
 /// that call sites read as what they do instead of as `mark(true, false)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +211,10 @@ pub struct RoughcutApp {
     pub scrubbing: bool,
     /// The middle button is held and panning the timeline.
     pub panning: bool,
+    /// Wall clock at the last playback tick while the playhead is on a
+    /// photograph. mpv reports no position at all while it holds a single
+    /// frame, so the playhead has to be carried across by hand.
+    still_tick: Option<std::time::Instant>,
     /// Set when the playhead crosses a cut, so the next media sync forces mpv
     /// to the new position instead of letting it keep playing where it was.
     force_media_jump: bool,
@@ -266,7 +281,10 @@ pub struct RoughcutApp {
 
     /// Text for the alert bar, with when it was set. Info messages expire;
     /// warnings and errors stay until the condition behind them clears.
-    pub status: Option<(String, StatusKind, std::time::Instant)>,
+    /// Notifications, oldest first. A list rather than one slot because two
+    /// things can happen at once — a render finishing while an import
+    /// complains — and the second was silently destroying the first.
+    pub toasts: Vec<Toast>,
     pub show_help: bool,
     pub show_missing_tool: bool,
     pub missing_media: Vec<(ClipId, PathBuf)>,
@@ -326,6 +344,7 @@ impl RoughcutApp {
             dragging_item: None,
             scrubbing: false,
             panning: false,
+            still_tick: None,
             mark_drag: None,
             mark_grab: None,
             trim_drag: None,
@@ -347,7 +366,7 @@ impl RoughcutApp {
             sheet_requested: HashSet::new(),
             proxy_state: HashMap::new(),
             rotating: HashSet::new(),
-            status: None,
+            toasts: Vec::new(),
             show_help: false,
             show_missing_tool: false,
             missing_media: Vec::new(),
@@ -420,7 +439,23 @@ impl RoughcutApp {
             StatusKind::Warn => log::warn!("{text}"),
             StatusKind::Info => log::info!("{text}"),
         }
-        self.status = Some((text, kind, std::time::Instant::now()));
+        // The same message twice in a row is one message. Re-probing a bin
+        // can otherwise stack a dozen identical complaints.
+        if self.toasts.last().is_some_and(|t| t.text == text) {
+            if let Some(last) = self.toasts.last_mut() {
+                last.at = std::time::Instant::now();
+            }
+            return;
+        }
+        self.toasts.push(Toast {
+            text,
+            kind,
+            at: std::time::Instant::now(),
+        });
+        // Older ones go first: the newest is the one being reacted to.
+        while self.toasts.len() > MAX_TOASTS {
+            self.toasts.remove(0);
+        }
     }
 
     /// How long an informational message stays on screen. Long enough to read
@@ -430,17 +465,15 @@ impl RoughcutApp {
     /// Drop an expired message, and say when to come back if one is still
     /// counting down. Returns the repaint delay, if any.
     fn expire_status(&mut self) -> Option<std::time::Duration> {
-        let (_, kind, at) = self.status.as_ref()?;
-        if *kind != StatusKind::Info {
-            return None;
-        }
-        let elapsed = at.elapsed();
-        if elapsed >= Self::STATUS_TTL {
-            self.status = None;
-            None
-        } else {
-            Some(Self::STATUS_TTL - elapsed)
-        }
+        self.toasts
+            .retain(|t| t.kind != StatusKind::Info || t.at.elapsed() < Self::STATUS_TTL);
+        // Come back exactly when the next one is due to disappear, and not
+        // before: a countdown must not become a reason to repaint at idle.
+        self.toasts
+            .iter()
+            .filter(|t| t.kind == StatusKind::Info)
+            .map(|t| Self::STATUS_TTL.saturating_sub(t.at.elapsed()))
+            .min()
     }
 
     /// Run an edit, snapshotting for undo only if it actually changed things.
@@ -654,6 +687,17 @@ impl RoughcutApp {
     fn advance_playback(&mut self) {
         match self.monitor.transport {
             Transport::Forward(_) => {
+                // A photograph is one frame held for a length it was given, so
+                // mpv has nothing new to report for the whole of it and
+                // `time-pos` simply stops. Measured: it resumes at exactly the
+                // right moment on the far side, so carrying the playhead
+                // across on wall clock stays in step with the picture.
+                if self.on_a_still() {
+                    self.advance_across_still();
+                    return;
+                }
+                self.still_tick = None;
+
                 // A seek issued mid-playback has not landed yet, and mpv is
                 // still reporting where it was. Adopting that would drag the
                 // playhead straight back off the point just clicked on.
@@ -681,6 +725,40 @@ impl RoughcutApp {
                 }
             }
             Transport::Paused => {}
+        }
+    }
+
+    /// Is the playhead sitting on a photograph rather than on footage?
+    fn on_a_still(&self) -> bool {
+        match self.focus {
+            Focus::Source => self.selected_source().is_some_and(|c| c.still),
+            Focus::Timeline => timeline::item_at(&self.project.timeline, self.playhead)
+                .and_then(|(i, _)| self.project.timeline.get(i))
+                .and_then(|item| self.project.clip(item.clip_id))
+                .is_some_and(|c| c.still),
+        }
+    }
+
+    /// Move the playhead through a still at the project rate.
+    ///
+    /// Whole frames only, with the remainder carried forward, so this cannot
+    /// drift against mpv over a long hold the way repeated rounding would.
+    fn advance_across_still(&mut self) {
+        let fps = self.fps().as_f64().max(1.0);
+        let now = std::time::Instant::now();
+        let last = *self.still_tick.get_or_insert(now);
+        let frames = (now.duration_since(last).as_secs_f64() * fps).floor() as i64;
+        if frames <= 0 {
+            return;
+        }
+        self.still_tick =
+            Some(last + std::time::Duration::from_secs_f64(frames as f64 / fps));
+
+        let target = self.position() + frames;
+        let last_frame = self.position_max();
+        self.set_position(target);
+        if target >= last_frame {
+            self.monitor.pause();
         }
     }
 
@@ -2174,6 +2252,11 @@ impl RoughcutApp {
         let Some(clip) = self.project.clip(id) else {
             return;
         };
+        // A photograph has nothing to transcode: it is one frame, already
+        // decoded in a few milliseconds.
+        if clip.still {
+            return;
+        }
         // Already has one, or is already having one made.
         if clip.proxy_path.as_ref().is_some_and(|p| p.exists())
             || matches!(
@@ -2274,6 +2357,11 @@ impl RoughcutApp {
     /// two hundred clips only ever builds sheets for the ones looked at.
     pub fn request_scrub_sheet(&mut self, id: ClipId) {
         if self.sheets.contains_key(&id) {
+            return;
+        }
+        // Every tile of a photograph would be the same picture. The poster
+        // already is that picture.
+        if self.project.clip(id).is_some_and(|c| c.still) {
             return;
         }
         self.request_tiles(id, crate::workers::SCRUB_TILES);
