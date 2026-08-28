@@ -189,6 +189,45 @@ naming because it is what phones actually produce, and because by codec it is
 indistinguishable from video — it is an HEVC frame in an MP4-family container.
 Stills are therefore recognised by extension, which is unambiguous.
 
+## Reading a clip instead of watching it
+
+Skimming two hours of footage by picture means dragging past four and a half
+seconds per pixel. Reading it means finding the moment somebody says the thing.
+Every clip with audio is transcribed as it is imported, and `T` shows the
+result as a document: click a word to go there, drag across a sentence to
+select it.
+
+**The selection is not a new verb.** It sets the same `in` and `out` that `I`
+and `O` do, so the scrub bar shades it, `A` appends it, and dragging its
+handles trims it. Nothing else in the application had to learn that text
+exists.
+
+Transcription is whisper.cpp, discovered on disk exactly as ffmpeg and melt
+are, running entirely on this machine — the audio of somebody's family holiday
+is not something to upload in order to find out where the laughing is. Measured
+on an RTX 3080 with `medium.en`: **24x realtime**, so a seven-minute clip takes
+18 seconds and a two-hour one about five minutes. Results are cached, and the
+second open of the same two clips restored them in **286 ms** against 23
+seconds to produce.
+
+### Two things measurement decided
+
+**Word timestamps come from `-ml 1 -sow`, not from tokens.** whisper.cpp will
+emit token-level timestamps and they cannot be used: on real speech they come
+back non-monotonic, one word here claiming to start at 24120 ms and end at
+16410. Asking instead for one word per *segment* routes every word through the
+segment timing path, which was checked by cutting each range and transcribing
+it again — the words came back the same.
+
+**A cut is padded by 250 ms before and 400 ms after.** Landing exactly on the
+first consonant clips it, and the listener hears somebody already talking. The
+head gets more air than the tail because a late start is much more noticeable
+than an early end.
+
+Whisper also emits `>>` for a change of speaker, `[BLANK_AUDIO]`, and `♪` for
+music. All of them are dropped: they would otherwise be selectable and cuttable
+as though they were words.
+
 ## Variable frame rate
 
 Phones shoot it constantly, and it breaks the one agreement everything else

@@ -110,6 +110,7 @@ fn map_key(key: Key, m: Modifiers) -> Option<Action> {
         Key::Minus => Some(Action::ZoomOut),
         Key::Equals | Key::Plus => Some(Action::ZoomIn),
         Key::Num0 => Some(Action::ZoomFit),
+        Key::T => Some(Action::ToggleTranscript),
         Key::F11 => Some(Action::ToggleFullscreen),
         Key::Questionmark => Some(Action::ToggleHelp),
         Key::Slash if shift => Some(Action::ToggleHelp),
@@ -279,6 +280,7 @@ mod tests {
             Action::ZoomFit,
             Action::ToggleFullscreen,
             Action::ToggleHelp,
+            Action::ToggleTranscript,
         ];
         let all_keys = [
             Key::Space, Key::L, Key::J, Key::K, Key::ArrowLeft, Key::ArrowRight,
@@ -286,6 +288,7 @@ mod tests {
             Key::X, Key::A, Key::Enter, Key::V, Key::Delete, Key::Backspace,
             Key::OpenBracket, Key::CloseBracket, Key::S, Key::E, Key::Z, Key::N,
             Key::Tab, Key::Minus, Key::Equals, Key::Num0, Key::Questionmark, Key::F11,
+            Key::T,
         ];
         let mut produced = Vec::new();
         for k in all_keys {

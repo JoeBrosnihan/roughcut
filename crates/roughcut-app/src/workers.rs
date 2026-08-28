@@ -14,7 +14,9 @@ use roughcut_core::proxy;
 use roughcut_core::rotate::{self, Turn};
 use roughcut_core::time::{frame_to_seconds, Rational};
 use roughcut_core::tools::{quiet_command, Tools};
+use roughcut_core::transcript::{self, Transcript};
 use roughcut_core::waveform;
+use roughcut_core::whisper;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -69,6 +71,13 @@ pub enum Priority {
     /// is midway through a transcode.
     High,
     Low,
+    /// Transcription, on a thread of its own - exactly one at a time.
+    ///
+    /// Not a matter of politeness: whisper holds over a gigabyte of model in
+    /// VRAM, and four at once do not fit on a 10 GB card. Keeping it off the
+    /// general queue also means a long transcription can never delay a
+    /// thumbnail somebody is waiting to see.
+    Slow,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +114,12 @@ pub enum Job {
     },
     /// The loudness envelope drawn under the scrub bar.
     Waveform {
+        clip_id: ClipId,
+        path: PathBuf,
+        cache_dir: Option<PathBuf>,
+    },
+    /// What is said in a clip, and when.
+    Transcribe {
         clip_id: ClipId,
         path: PathBuf,
         cache_dir: Option<PathBuf>,
@@ -160,11 +175,16 @@ pub enum JobResult {
         clip_id: ClipId,
         result: Result<Vec<u8>>,
     },
+    Transcribed {
+        clip_id: ClipId,
+        result: Result<Transcript>,
+    },
 }
 
 struct Queue {
     high: VecDeque<Job>,
     low: VecDeque<Job>,
+    slow: VecDeque<Job>,
     suspended: bool,
     shutdown: bool,
 }
@@ -179,6 +199,7 @@ impl Job {
             // somebody is waiting on.
             Job::Probe { .. } | Job::Rotate { .. } | Job::Waveform { .. } => Priority::High,
             Job::Thumbs { tiles, .. } if *tiles <= 1 => Priority::High,
+            Job::Transcribe { .. } => Priority::Slow,
             Job::Thumbs { .. } | Job::Proxy { .. } => Priority::Low,
         }
     }
@@ -210,6 +231,7 @@ impl WorkerPool {
             queue: Mutex::new(Queue {
                 high: VecDeque::new(),
                 low: VecDeque::new(),
+                slow: VecDeque::new(),
                 suspended: false,
                 shutdown: false,
             }),
@@ -226,14 +248,21 @@ impl WorkerPool {
         // through a multi-second transcode, a rotation the user just asked for
         // would sit there until one of them finished. This thread is asleep on
         // a condvar essentially always, so reserving it costs nothing.
-        let threads = (0..pool_size() + 1)
+        let threads = (0..pool_size() + 2)
             .map(|i| {
                 let shared = shared.clone();
-                let interactive = i == pool_size();
-                let name = if interactive {
-                    "roughcut-interactive".to_string()
+                let role = if i == pool_size() {
+                    Role::Interactive
+                } else if i == pool_size() + 1 {
+                    Role::Transcriber
                 } else {
-                    format!("roughcut-worker-{i}")
+                    Role::General
+                };
+                let interactive = role == Role::Interactive;
+                let name = match role {
+                    Role::Interactive => "roughcut-interactive".to_string(),
+                    Role::Transcriber => "roughcut-transcriber".to_string(),
+                    Role::General => format!("roughcut-worker-{i}"),
                 };
                 std::thread::Builder::new()
                     .name(name)
@@ -244,7 +273,7 @@ impl WorkerPool {
                         if !interactive {
                             lower_thread_priority();
                         }
-                        worker_loop(shared, interactive);
+                        worker_loop(shared, role);
                     })
                     .expect("cannot spawn worker thread")
             })
@@ -266,6 +295,7 @@ impl WorkerPool {
             match job.priority() {
                 Priority::High => q.high.push_back(job),
                 Priority::Low => q.low.push_back(job),
+                Priority::Slow => q.slow.push_back(job),
             }
         }
         // `notify_all`, not `notify_one`: the reserved thread ignores
@@ -299,6 +329,7 @@ impl WorkerPool {
         let mut q = self.shared.queue.lock().unwrap();
         q.high.clear();
         q.low.clear();
+        q.slow.clear();
     }
 }
 
@@ -309,6 +340,7 @@ impl Drop for WorkerPool {
             q.shutdown = true;
             q.high.clear();
             q.low.clear();
+            q.slow.clear();
         }
         self.shared.wake.notify_all();
         for t in self.threads.drain(..) {
@@ -317,7 +349,18 @@ impl Drop for WorkerPool {
     }
 }
 
-fn worker_loop(shared: Arc<Shared>, interactive: bool) {
+/// What a worker thread is allowed to pick up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// Anything except transcription.
+    General,
+    /// High priority only, so it is always free for what was just asked for.
+    Interactive,
+    /// Transcription only, so exactly one runs at a time.
+    Transcriber,
+}
+
+fn worker_loop(shared: Arc<Shared>, role: Role) {
     loop {
         // Block until there is work and we are not suspended. A condvar wait
         // is a real OS sleep: no timer, no wakeups, no CPU.
@@ -327,13 +370,26 @@ fn worker_loop(shared: Arc<Shared>, interactive: bool) {
                 if q.shutdown {
                     return;
                 }
-                if !q.suspended {
+                // Transcription carries on while the window is not focused.
+                //
+                // Everything else here is speculative work for a bin you are
+                // looking at, and §3 rightly stops it the moment you look
+                // somewhere else. A transcription run is the opposite: it is
+                // minutes of work over every clip in the project, explicitly
+                // asked for, and the whole point is to walk away and come back
+                // to a bin you can read. Suspending it would mean it only ever
+                // progressed while being watched.
+                //
+                // Idle still costs nothing: this thread sleeps on the same
+                // condvar as the rest and wakes only when there is a clip
+                // waiting.
+                if !q.suspended || role == Role::Transcriber {
                     // The reserved thread never touches the low queue, so it
                     // is always free for the next thing the user asks for.
-                    let next = if interactive {
-                        q.high.pop_front()
-                    } else {
-                        q.high.pop_front().or_else(|| q.low.pop_front())
+                    let next = match role {
+                        Role::Interactive => q.high.pop_front(),
+                        Role::Transcriber => q.slow.pop_front(),
+                        Role::General => q.high.pop_front().or_else(|| q.low.pop_front()),
                     };
                     if let Some(job) = next {
                         break job;
@@ -453,7 +509,62 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             };
             JobResult::Waved { clip_id, result }
         }
+        Job::Transcribe {
+            clip_id,
+            path,
+            cache_dir,
+        } => {
+            let result = make_transcript(shared, &path, cache_dir.as_deref());
+            JobResult::Transcribed { clip_id, result }
+        }
     }
+}
+
+/// A clip transcript, cached on disk between sessions.
+///
+/// Worth caching more than anything else here: this is the only job measured
+/// in tens of seconds, and re-running it on every reopen would make a large
+/// project unusable for the first ten minutes of every session.
+fn make_transcript(
+    shared: &Shared,
+    path: &std::path::Path,
+    cache_dir: Option<&std::path::Path>,
+) -> Result<Transcript> {
+    let cache_file = cache_dir.map(|d| transcript::cache_file(d, fingerprint(path, &[])));
+    if let Some(file) = &cache_file {
+        if let Ok(text) = std::fs::read_to_string(file) {
+            if let Ok(cached) = serde_json::from_str::<Transcript>(&text) {
+                return Ok(cached);
+            }
+        }
+    }
+
+    let Some(ffmpeg) = &shared.tools.ffmpeg else {
+        bail!("ffmpeg is not available");
+    };
+    let Some(binary) = &shared.tools.whisper else {
+        bail!("whisper-cli was not found");
+    };
+    let model = whisper::find_model(binary)
+        .with_context(|| format!("no ggml model beside {}", binary.display()))?;
+
+    let scratch = std::env::temp_dir().join("roughcut-whisper");
+    let transcript = whisper::transcribe(ffmpeg, binary, &model, path, &scratch)?;
+
+    if let Some(file) = &cache_file {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match serde_json::to_string(&transcript) {
+            Ok(text) => {
+                if let Err(e) = std::fs::write(file, text) {
+                    log::debug!("cannot cache transcript at {}: {e}", file.display());
+                }
+            }
+            Err(e) => log::debug!("cannot serialise transcript: {e}"),
+        }
+    }
+    Ok(transcript)
 }
 
 /// A clip's audio envelope, kept on disk between sessions.

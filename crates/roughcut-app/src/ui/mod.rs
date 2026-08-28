@@ -10,6 +10,7 @@ pub mod help;
 pub mod monitor_panel;
 pub mod status;
 pub mod timeline;
+pub mod transcript_panel;
 
 use crate::theme;
 use egui::{CornerRadius, Rect, StrokeKind};

@@ -70,5 +70,6 @@ act on whichever region currently has focus; press `Tab` to switch.
 | `- / =` | Zoom the timeline out / in | Timeline |
 | `0` | Fit the timeline to the window | Timeline |
 | `Ctrl+Wheel` | Zoom the timeline about the pointer | Timeline |
+| `T` | Read the transcript instead of the picture | Any |
 | `F11` | Toggle fullscreen | Any |
 | `?` | Show this help | Any |

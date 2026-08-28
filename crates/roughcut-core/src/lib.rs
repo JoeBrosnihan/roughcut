@@ -28,7 +28,9 @@ pub mod rotate;
 pub mod time;
 pub mod timeline;
 pub mod tools;
+pub mod transcript;
 pub mod waveform;
+pub mod whisper;
 
 pub use model::{ClipId, Profile, Project, SourceClip, TimelineItem, SCHEMA_VERSION};
 pub use time::Rational;

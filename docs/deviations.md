@@ -97,3 +97,16 @@ producer rather than an `avformat` chain, no proxy or scrub sheet is built for
 one, and playback carries the playhead across it on wall clock, because mpv
 reports no position at all while it holds a single frame. Requested by the
 user. See [timing.md](timing.md).
+
+**15. Transcription keeps running while the window is not focused** (§3). Every
+other background job stops the moment you look somewhere else, and should:
+thumbnails, proxies and waveforms are speculative work for a bin you are
+currently looking at. A transcription run is the opposite — minutes of work
+across every clip in the project, explicitly asked for, and the entire point is
+to walk away and come back to a bin you can read. Suspending it would mean it
+only ever progressed while being watched.
+
+It runs on one dedicated thread, never more, because whisper holds over a
+gigabyte of model in VRAM and four at once do not fit on a 10 GB card. Idle
+still costs nothing: that thread sleeps on the same condvar as the rest and
+wakes only when a clip is waiting. Requested by the user.

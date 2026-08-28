@@ -149,6 +149,12 @@ pub fn waveform_cache_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("waveforms"))
 }
 
+/// Where transcripts are kept. The most valuable cache of the three: a
+/// transcript costs tens of seconds to produce and tens of kilobytes to keep.
+pub fn transcript_cache_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("transcripts"))
+}
+
 pub fn autosave_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("autosave.roughcut"))
 }

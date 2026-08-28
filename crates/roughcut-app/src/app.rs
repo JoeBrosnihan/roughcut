@@ -21,6 +21,7 @@ use roughcut_core::project_io;
 use roughcut_core::rotate::Turn;
 use roughcut_core::time::{format_timecode, Rational};
 use roughcut_core::timeline::{self, Edge};
+use roughcut_core::transcript::{Selection, Transcript};
 use roughcut_core::tools::{expand_drop, Tools};
 use roughcut_core::undo::History;
 
@@ -264,6 +265,20 @@ pub struct RoughcutApp {
     /// The dense sheets hover-scrubbing indexes into. Each is a couple of
     /// megabytes, so only the most recently used are kept resident.
     pub sheets: HashMap<ClipId, Thumb>,
+    /// What is said in each clip, once whisper has got to it. Kept for every
+    /// clip: a transcript is a few tens of kilobytes and it is the index the
+    /// whole document view is built on.
+    pub transcripts: HashMap<ClipId, Transcript>,
+    transcript_requested: HashSet<ClipId>,
+    /// Clips whose transcription has been started but not finished, so the
+    /// view can say so rather than looking empty.
+    pub transcribing: HashSet<ClipId>,
+    /// The monitor shows the transcript instead of the picture.
+    pub show_transcript: bool,
+    /// Words selected in the document, as indices into the flattened
+    /// transcript, and whether a drag is still in progress.
+    pub text_selection: Option<Selection>,
+    pub selecting_text: bool,
     /// One loudness envelope per clip that has been opened in the monitor, at
     /// a byte a bucket. Two kilobytes each, so unlike the sheets these are
     /// never evicted — a bin of a thousand clips would still be 2 MB.
@@ -361,6 +376,12 @@ impl RoughcutApp {
             sheets: HashMap::new(),
             waveforms: HashMap::new(),
             waveform_requested: HashSet::new(),
+            transcripts: HashMap::new(),
+            transcript_requested: HashSet::new(),
+            transcribing: HashSet::new(),
+            show_transcript: false,
+            text_selection: None,
+            selecting_text: false,
             sheet_clock: 0,
             thumb_requested: HashSet::new(),
             sheet_requested: HashSet::new(),
@@ -852,7 +873,16 @@ impl RoughcutApp {
             Action::ClearOut => self.mark(MarkOp::ClearOut),
             Action::ClearMarks => self.mark(MarkOp::ClearBoth),
 
-            Action::Append => self.append_marked(),
+            Action::Append => {
+                // In the document, `A` appends what is selected. It is the
+                // same verb: the selection has already set the marks, so this
+                // only has to make sure they are the current ones.
+                if self.show_transcript && self.text_selection.is_some() {
+                    self.append_selected_text();
+                } else {
+                    self.append_marked();
+                }
+            }
             Action::Insert => self.insert_marked(),
 
             Action::Copy => self.copy_selection(false),
@@ -903,6 +933,15 @@ impl RoughcutApp {
             }
             Action::ZoomFit => self.zoom_fit = true,
             Action::ToggleFullscreen => self.fullscreen_pending = true,
+            Action::ToggleTranscript => {
+                self.show_transcript = !self.show_transcript;
+                if self.show_transcript {
+                    // Whatever is on screen is what you want to read.
+                    if let Some(id) = self.selected_clip {
+                        self.request_transcript(id);
+                    }
+                }
+            }
             Action::ToggleHelp => self.show_help = !self.show_help,
         }
     }
@@ -2112,6 +2151,24 @@ impl RoughcutApp {
                         self.set_status(format!("{e:#}"), StatusKind::Error);
                     }
                 },
+                JobResult::Transcribed { clip_id, result } => {
+                    self.transcribing.remove(&clip_id);
+                    match result {
+                        Ok(t) => {
+                            log::info!(
+                                "transcript for {clip_id}: {} words in {} sentences",
+                                t.word_count(),
+                                t.segments.len()
+                            );
+                            self.transcripts.insert(clip_id, t);
+                        }
+                        // Quiet by design. Transcription is speculative work
+                        // on every clip in the bin; a clip with no speech, or
+                        // one whisper cannot read, must not produce a
+                        // notification the user has to dismiss.
+                        Err(e) => log::debug!("transcript for {clip_id}: {e:#}"),
+                    }
+                }
                 JobResult::Waved { clip_id, result } => match result {
                     Ok(peaks) => {
                         self.waveforms.insert(clip_id, peaks);
@@ -2425,6 +2482,103 @@ impl RoughcutApp {
         });
     }
 
+    /// Queue a clip for transcription, once.
+    ///
+    /// Every clip with audio is transcribed as it is imported, because the
+    /// point is to be able to search and read footage you have not watched
+    /// yet. It runs on its own thread at the back of everything else.
+    pub fn request_transcript(&mut self, id: ClipId) {
+        if self.transcripts.contains_key(&id) || self.tools.whisper.is_none() {
+            return;
+        }
+        let Some(clip) = self.project.clip(id) else {
+            return;
+        };
+        // A photograph says nothing, and a clip with no audio track has
+        // nothing to say either.
+        if clip.still || !clip.has_audio {
+            return;
+        }
+        let path = clip.playback_path().to_path_buf();
+        if !self.transcript_requested.insert(id) {
+            return;
+        }
+        self.transcribing.insert(id);
+        log::info!("transcribing {}", path.display());
+        self.workers.submit(Job::Transcribe {
+            clip_id: id,
+            path,
+            cache_dir: crate::settings::transcript_cache_dir(),
+        });
+    }
+
+    fn request_missing_transcripts(&mut self) {
+        let ids: Vec<ClipId> = self
+            .project
+            .clips
+            .iter()
+            .filter(|c| !self.transcripts.contains_key(&c.id))
+            .map(|c| c.id)
+            .collect();
+        for id in ids {
+            self.request_transcript(id);
+        }
+    }
+
+    /// The transcript of whatever the monitor is showing.
+    pub fn current_transcript(&self) -> Option<(ClipId, &Transcript)> {
+        let id = match self.focus {
+            Focus::Source => self.selected_clip?,
+            Focus::Timeline => {
+                let (i, _) = timeline::item_at(&self.project.timeline, self.playhead)?;
+                self.project.timeline.get(i)?.clip_id
+            }
+        };
+        Some((id, self.transcripts.get(&id)?))
+    }
+
+    /// Turn a selection in the document into the clip marks.
+    ///
+    /// Deliberately not a new verb. Selecting a sentence sets exactly the same
+    /// `in` and `out` that `I` and `O` do, so `A` appends it, the scrub bar
+    /// shades it, and dragging its handles trims it — the whole existing
+    /// vocabulary applies to text without knowing text exists.
+    pub fn mark_from_selection(&mut self) -> bool {
+        let Some(selection) = self.text_selection else {
+            return false;
+        };
+        let fps = self.fps();
+        let Some((id, transcript)) = self.current_transcript() else {
+            return false;
+        };
+        let Some(last) = self.project.clip(id).map(|c| c.last_frame()) else {
+            return false;
+        };
+        let Some((in_frame, out_frame)) = transcript.range(selection, fps, last) else {
+            return false;
+        };
+        self.selected_clip = Some(id);
+        self.focus = Focus::Source;
+        self.edit(|p| {
+            let Some(c) = p.clip_mut(id) else { return false };
+            c.mark_in = Some(in_frame);
+            c.mark_out = Some(out_frame);
+            true
+        });
+        self.set_position(in_frame);
+        self.force_media_jump = true;
+        true
+    }
+
+    /// Select a sentence and append it, which is the whole gesture in one key.
+    pub fn append_selected_text(&mut self) {
+        if !self.mark_from_selection() {
+            self.set_status("select some words first", StatusKind::Warn);
+            return;
+        }
+        self.append_marked();
+    }
+
     fn request_missing_thumbnails(&mut self) {
         let ids: Vec<ClipId> = self
             .project
@@ -2474,6 +2628,7 @@ impl eframe::App for RoughcutApp {
         self.monitor.pump_events();
         self.advance_playback();
         self.request_missing_thumbnails();
+        self.request_missing_transcripts();
 
         if !self.modal_open() {
             for action in keys::actions_this_frame(ctx) {

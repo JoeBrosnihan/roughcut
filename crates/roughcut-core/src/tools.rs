@@ -37,6 +37,11 @@ fn well_known_dirs() -> Vec<PathBuf> {
     {
         for base in [
             r"C:\Program Files\Shotcut",
+            // whisper.cpp, unzipped where `promote.ps1` puts Roughcut itself.
+            &format!(
+                r"{}\Programs\whisper",
+                std::env::var("LOCALAPPDATA").unwrap_or_default()
+            ),
             r"C:\Program Files\ffmpeg\bin",
             r"C:\Program Files (x86)\Shotcut",
         ] {
@@ -87,12 +92,38 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Find a `whisper-cli` that has a model beside it.
+///
+/// There can be more than one on a machine — Shotcut ships its own, without
+/// any model — and a binary with nothing to load is worse than none at all,
+/// because it fails per clip instead of once at startup. Every candidate is
+/// considered and one with a model always wins; a bare binary is returned only
+/// if that is all there is, so the error can still say something useful.
+pub fn find_whisper() -> Option<PathBuf> {
+    let file = format!("whisper-cli{EXE}");
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(paths) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&paths).map(|d| d.join(&file)));
+    }
+    candidates.extend(well_known_dirs().into_iter().map(|d| d.join(&file)));
+
+    let present: Vec<PathBuf> = candidates.into_iter().filter(|p| p.is_file()).collect();
+    present
+        .iter()
+        .find(|p| crate::whisper::find_model(p).is_some())
+        .or_else(|| present.first())
+        .cloned()
+}
+
 /// Paths to the external tools, with optional user overrides from settings.
 #[derive(Debug, Clone, Default)]
 pub struct Tools {
     pub ffprobe: Option<PathBuf>,
     pub ffmpeg: Option<PathBuf>,
     pub melt: Option<PathBuf>,
+    /// whisper.cpp, for transcripts. Entirely optional: without it the
+    /// transcript view says so and everything else is unaffected.
+    pub whisper: Option<PathBuf>,
 }
 
 impl Tools {
@@ -102,6 +133,7 @@ impl Tools {
             ffprobe: find_tool("ffprobe"),
             ffmpeg: find_tool("ffmpeg"),
             melt: find_tool("melt"),
+            whisper: find_whisper(),
         }
     }
 

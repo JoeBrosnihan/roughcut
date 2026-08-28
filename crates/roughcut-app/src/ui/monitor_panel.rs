@@ -34,7 +34,13 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
             let video_rect = Rect::from_min_max(full.min, egui::pos2(full.max.x, split));
             let scrub_rect = Rect::from_min_max(egui::pos2(full.min.x, split), full.max);
 
-            video(app, ui, video_rect);
+            // The document replaces the picture, never shares the space
+            // with it: half a monitor of each is worse at both.
+            if app.show_transcript {
+                crate::ui::transcript_panel::show(app, ui, video_rect);
+            } else {
+                video(app, ui, video_rect);
+            }
             scrub_bar(app, ui, scrub_rect);
             crate::ui::focus_border(ui, full, app.focus == Focus::Source);
         });

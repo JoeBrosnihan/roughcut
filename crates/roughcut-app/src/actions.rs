@@ -56,6 +56,8 @@ pub enum Action {
     ZoomFit,
     ToggleFullscreen,
     ToggleHelp,
+    /// Read the clip instead of watching it.
+    ToggleTranscript,
 }
 
 /// Which region a binding applies to, for the help overlay.
@@ -142,6 +144,7 @@ pub const KEY_MAP: &[Section] = &[
             Binding { keys: "- / =", description: "Zoom the timeline out / in", scope: Scope::Timeline },
             Binding { keys: "0", description: "Fit the timeline to the window", scope: Scope::Timeline },
             Binding { keys: "Ctrl+Wheel", description: "Zoom the timeline about the pointer", scope: Scope::Timeline },
+            Binding { keys: "T", description: "Read the transcript instead of the picture", scope: Scope::Global },
             Binding { keys: "F11", description: "Toggle fullscreen", scope: Scope::Global },
             Binding { keys: "?", description: "Show this help", scope: Scope::Global },
         ],
