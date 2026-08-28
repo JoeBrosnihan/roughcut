@@ -2491,6 +2491,12 @@ impl RoughcutApp {
         if self.transcripts.contains_key(&id) || self.tools.whisper.is_none() {
             return;
         }
+        // Already queued. Asking again means somebody is now looking at this
+        // clip, so it goes to the front rather than waiting its turn.
+        if self.transcript_requested.contains(&id) {
+            self.workers.prioritise_transcript(id);
+            return;
+        }
         let Some(clip) = self.project.clip(id) else {
             return;
         };
@@ -2500,9 +2506,7 @@ impl RoughcutApp {
             return;
         }
         let path = clip.playback_path().to_path_buf();
-        if !self.transcript_requested.insert(id) {
-            return;
-        }
+        self.transcript_requested.insert(id);
         self.transcribing.insert(id);
         log::info!("transcribing {}", path.display());
         self.workers.submit(Job::Transcribe {
@@ -2629,6 +2633,13 @@ impl eframe::App for RoughcutApp {
         self.advance_playback();
         self.request_missing_thumbnails();
         self.request_missing_transcripts();
+        // The clip in the monitor jumps the transcription queue. Cheap enough
+        // to do every pass, and passes only happen on input.
+        if let Some(id) = self.selected_clip {
+            if self.transcribing.contains(&id) {
+                self.request_transcript(id);
+            }
+        }
 
         if !self.modal_open() {
             for action in keys::actions_this_frame(ctx) {

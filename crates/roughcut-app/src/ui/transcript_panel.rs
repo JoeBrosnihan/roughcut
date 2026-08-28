@@ -40,6 +40,10 @@ pub fn show(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: egui::Rect) {
 
     let mut clicked_word: Option<usize> = None;
     let mut hovered_word: Option<usize> = None;
+    // Scrolling to keep up is only wanted while something is playing, and
+    // never while a selection is being dragged — the document moving under a
+    // drag would change what is being selected.
+    let following = app.monitor.transport.is_playing() && !app.selecting_text;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -67,39 +71,40 @@ pub fn show(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: egui::Rect) {
                         let i = index;
                         index += 1;
                         let selected = app.text_selection.is_some_and(|s| s.contains(i));
-                        let colour = if selected {
-                            theme::TEXT
-                        } else if current_word == Some(i) {
-                            theme::PLAYHEAD
-                        } else {
-                            theme::TEXT
+                        let speaking = current_word == Some(i);
+
+                        // The background is part of the text rather than a
+                        // rectangle painted over it afterwards. Overdrawing
+                        // meant re-drawing the word on top of its own
+                        // highlight, at a position guessed from the label rect
+                        // rather than from where the glyphs actually sat.
+                        let mut text = egui::RichText::new(&word.text).size(13.5);
+                        text = match (selected, speaking) {
+                            (true, _) => text
+                                .color(theme::TEXT)
+                                .background_color(theme::ACCENT.linear_multiply(0.45)),
+                            (false, true) => text
+                                .color(theme::BG)
+                                .background_color(theme::PLAYHEAD),
+                            (false, false) => text.color(theme::TEXT),
                         };
-                        let response = ui.add(
-                            egui::Label::new(egui::RichText::new(&word.text).size(13.5).color(colour))
-                                .sense(egui::Sense::click_and_drag()),
-                        );
-                        if selected {
-                            ui.painter().rect_filled(
-                                response.rect.expand2(egui::vec2(2.0, 1.0)),
-                                egui::CornerRadius::same(2),
-                                theme::ACCENT.linear_multiply(0.35),
-                            );
-                            // Painted after the fact, so put the word back on
-                            // top of its own highlight.
-                            ui.painter().text(
-                                response.rect.left_top(),
-                                egui::Align2::LEFT_TOP,
-                                &word.text,
-                                egui::FontId::proportional(13.5),
-                                theme::TEXT,
-                            );
+                        let response =
+                            ui.add(egui::Label::new(text).sense(egui::Sense::click_and_drag()));
+
+                        // Follow the speaker. Only while playing, and only
+                        // when the word has actually left the visible area:
+                        // re-centring on every frame would keep the whole
+                        // document sliding, which is harder to read than the
+                        // thing it is trying to help you read.
+                        if speaking && following {
+                            let clip = ui.clip_rect();
+                            let off_screen = response.rect.top() < clip.top()
+                                || response.rect.bottom() > clip.bottom();
+                            if off_screen {
+                                response.scroll_to_me(Some(egui::Align::Center));
+                            }
                         }
-                        if current_word == Some(i) && !selected {
-                            ui.painter().line_segment(
-                                [response.rect.left_bottom(), response.rect.right_bottom()],
-                                egui::Stroke::new(1.5, theme::PLAYHEAD),
-                            );
-                        }
+
                         if response.hovered() {
                             hovered_word = Some(i);
                         }

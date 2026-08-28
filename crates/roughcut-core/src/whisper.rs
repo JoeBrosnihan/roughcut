@@ -197,6 +197,14 @@ fn ends_sentence(text: &str) -> bool {
 /// Whisper omits full stops surprisingly often on conversational speech.
 const PARAGRAPH_GAP_MS: i64 = 2000;
 
+/// A paragraph never runs longer than this, whatever the punctuation says.
+///
+/// Singing is the case that forces it: whisper transcribes lyrics without a
+/// full stop anywhere, so a song becomes one unbroken run of words. Measured
+/// on a clip here, 29 words with no break at all — readable, but a long take
+/// would be a wall of text with nothing to aim a selection at.
+const MAX_PARAGRAPH_WORDS: usize = 40;
+
 /// Turn whisper.cpp's JSON into a transcript.
 pub fn parse_json(json: &str) -> Result<Transcript> {
     let value: serde_json::Value =
@@ -242,7 +250,7 @@ pub fn parse_json(json: &str) -> Result<Transcript> {
             end_ms: end.max(start),
         });
 
-        if ends_sentence(text) {
+        if ends_sentence(text) || current.len() >= MAX_PARAGRAPH_WORDS {
             segments.push(Segment {
                 words: std::mem::take(&mut current),
             });
@@ -339,6 +347,33 @@ mod tests {
         assert_eq!(t.segments.len(), 2, "an eight-second gap is a new paragraph");
         assert_eq!(t.segments[0].text(), "one two");
         assert_eq!(t.segments[1].text(), "three");
+    }
+
+    /// Lyrics arrive without a full stop anywhere, so something other than
+    /// punctuation has to break them up.
+    #[test]
+    fn an_unpunctuated_run_is_broken_into_readable_paragraphs() {
+        let words: Vec<String> = (0..95)
+            .map(|i| {
+                format!(
+                    r#"{{"offsets":{{"from":{},"to":{}}},"text":" la"}}"#,
+                    i * 300,
+                    i * 300 + 250
+                )
+            })
+            .collect();
+        let json = format!(r#"{{"transcription":[{}]}}"#, words.join(","));
+        let t = parse_json(&json).unwrap();
+
+        assert_eq!(t.word_count(), 95, "no word is lost to the break");
+        assert!(t.segments.len() >= 3, "{} paragraphs", t.segments.len());
+        for seg in &t.segments {
+            assert!(
+                seg.words.len() <= MAX_PARAGRAPH_WORDS,
+                "a paragraph of {} words is a wall of text",
+                seg.words.len()
+            );
+        }
     }
 
     #[test]

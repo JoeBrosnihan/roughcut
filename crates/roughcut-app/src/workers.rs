@@ -324,6 +324,30 @@ impl WorkerPool {
         self.results.try_iter()
     }
 
+    /// Move a clip transcription to the front of the queue.
+    ///
+    /// Transcribing a large bin is minutes of work in import order, so the
+    /// clip you actually opened can easily be a hundred places down the list.
+    /// Nothing is cancelled and nothing is re-submitted: the job that is
+    /// already queued simply goes first.
+    ///
+    /// Returns true if it was still waiting. False means it is either already
+    /// running or already done, and in both cases there is nothing to hurry.
+    pub fn prioritise_transcript(&self, clip_id: ClipId) -> bool {
+        let mut q = self.shared.queue.lock().unwrap();
+        let Some(at) = q.slow.iter().position(
+            |j| matches!(j, Job::Transcribe { clip_id: c, .. } if *c == clip_id),
+        ) else {
+            return false;
+        };
+        if at > 0 {
+            if let Some(job) = q.slow.remove(at) {
+                q.slow.push_front(job);
+            }
+        }
+        true
+    }
+
     /// Drop everything not yet started, e.g. when a project is closed.
     pub fn clear_queue(&self) {
         let mut q = self.shared.queue.lock().unwrap();
@@ -1116,6 +1140,54 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opening a clip a hundred places down the queue must not mean waiting
+    /// for the ninety-nine in front of it.
+    #[test]
+    fn the_clip_you_are_looking_at_jumps_the_transcription_queue() {
+        let ctx = egui::Context::default();
+        let pool = WorkerPool::new(ctx, Tools::default());
+        let ids: Vec<ClipId> = (0..5).map(|_| ClipId::new()).collect();
+
+        // Suspend first, so nothing is picked up while the order is checked.
+        pool.set_suspended(true);
+        for id in &ids {
+            pool.submit(Job::Transcribe {
+                clip_id: *id,
+                path: PathBuf::from("a.mp4"),
+                cache_dir: None,
+            });
+        }
+
+        let order = |pool: &WorkerPool| -> Vec<ClipId> {
+            pool.shared
+                .queue
+                .lock()
+                .unwrap()
+                .slow
+                .iter()
+                .map(|j| match j {
+                    Job::Transcribe { clip_id, .. } => *clip_id,
+                    _ => unreachable!("only transcriptions go on the slow queue"),
+                })
+                .collect()
+        };
+        assert_eq!(order(&pool), ids, "submitted in order");
+
+        assert!(pool.prioritise_transcript(ids[3]));
+        assert_eq!(order(&pool)[0], ids[3], "the one asked for goes first");
+        // Everything else keeps its order; nothing is dropped or duplicated.
+        assert_eq!(order(&pool).len(), 5);
+        assert_eq!(order(&pool)[1..], [ids[0], ids[1], ids[2], ids[4]]);
+
+        // Already at the front: legal, and changes nothing.
+        assert!(pool.prioritise_transcript(ids[3]));
+        assert_eq!(order(&pool)[0], ids[3]);
+
+        // A clip with nothing queued is not an error - it is already done, or
+        // already running, and either way there is nothing to hurry.
+        assert!(!pool.prioritise_transcript(ClipId::new()));
     }
 
     #[test]

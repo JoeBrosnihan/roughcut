@@ -311,6 +311,8 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let marked = clip.mark_in.is_some() || clip.mark_out.is_some();
     let path = clip.path.display().to_string();
     let proxy_state = app.proxy_state.get(&id).copied();
+    let transcribing = app.transcribing.contains(&id);
+    let transcribed = app.transcripts.get(&id).is_some_and(|t| !t.is_empty());
     let uses = app.project.timeline_uses(id);
 
     let response = ui.interact(
@@ -445,6 +447,14 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         Some(ProxyState::Failed) => badge("PXY!", theme::ERROR),
         None if has_proxy => badge("PXY", theme::MARK_IN),
         None => {}
+    }
+    // Whether this clip can be read as well as watched. Worth showing across a
+    // large bin, because transcription runs for minutes and there is otherwise
+    // no way to tell how far it has got.
+    if transcribing {
+        badge("TXT…", theme::TEXT_DIM);
+    } else if transcribed {
+        badge("TXT", theme::ACCENT);
     }
     // Whether this clip is in the cut, and how many times. It is the question
     // the bin gets asked most while assembling — "have I used this one yet?" —

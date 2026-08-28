@@ -226,7 +226,19 @@ than an early end.
 
 Whisper also emits `>>` for a change of speaker, `[BLANK_AUDIO]`, and `♪` for
 music. All of them are dropped: they would otherwise be selectable and cuttable
-as though they were words.
+as though they were words. Paragraphs break on punctuation, on two seconds of
+silence, and — because singing is transcribed without a full stop anywhere — at
+forty words regardless.
+
+While a clip plays, the word being spoken is highlighted and the document
+follows it, but only once the word has actually scrolled out of sight.
+Re-centring every frame would keep the whole page sliding, which is harder to
+read than the thing it is trying to help you read.
+
+The clip you have open jumps the transcription queue. Import order is the right
+order to work through a bin, and entirely the wrong one when you have just
+opened the hundredth clip: nothing is cancelled or re-run, the job that is
+already waiting simply goes first.
 
 ## Variable frame rate
 
