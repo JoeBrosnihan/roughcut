@@ -87,3 +87,33 @@ as a timeline).
 
 Frame accuracy is verified separately — see
 [verification.md](verification.md).
+
+## What an audio track would look like
+
+Not implemented, but measured, so the shape is known rather than guessed. An
+audio track is a playlist like any other, distinguished by three `shotcut:`
+properties and one attribute on its `<track>`:
+
+```xml
+<playlist id="playlist1">
+  <property name="shotcut:video">0</property>
+  <property name="shotcut:audio">1</property>
+  <property name="shotcut:name">A1</property>
+  <entry producer="chain1" in="0" out="209"/>
+</playlist>
+...
+<track producer="playlist1" hide="video"/>
+```
+
+`hide="video"` is what makes it an audio track: the producer is an ordinary
+`avformat-novalidate` chain, and MLT simply ignores its picture. Each track
+above the background also needs its own `mix` transition against track 0 — the
+same one already written for the video track, with `b_track` pointing at the
+new index. `reference/shotcut-b.mlt` is a real project with V1, V2 and A1.
+
+Verified by rendering a two-track project through `melt` with a 300 Hz tone on
+the video track and a 1000 Hz tone on the audio track: the output carried both,
+at -18.0 dB and -20.7 dB. Nothing about the export path resists this.
+
+The preview is the harder half, and is covered in
+`crates/roughcut-mpv/examples/music_probe.rs`.
