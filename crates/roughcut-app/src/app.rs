@@ -42,6 +42,17 @@ pub enum MarkEdge {
     Out,
 }
 
+/// An audio item being dragged along or between lanes.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioDrag {
+    /// Where it came from.
+    pub track: usize,
+    pub index: usize,
+    /// Frames moved so far, and the lane it is currently over.
+    pub delta: i64,
+    pub to_track: usize,
+}
+
 /// A timeline clip being retrimmed by dragging one of its edges.
 #[derive(Debug, Clone, Copy)]
 pub struct TrimDrag {
@@ -208,6 +219,17 @@ pub struct RoughcutApp {
     pub timeline_scroll_to: Option<f32>,
     /// Timeline item being dragged to a new position, if any.
     pub dragging_item: Option<usize>,
+    /// Selected audio item, as (track, index into that track).
+    pub selected_audio: Option<(usize, usize)>,
+    /// An audio item being dragged, and how far it has moved so far.
+    pub dragging_audio: Option<AudioDrag>,
+    /// The audio tracks flattened to one file for the preview to play, and the
+    /// signature of the tracks it was made from. The signature is in the file
+    /// name, so a stale bed can never be mistaken for a current one.
+    audio_bed: Option<(u64, PathBuf)>,
+    /// Signature of the bed currently being mixed, so an edit does not queue
+    /// the same work twice.
+    bed_pending: Option<u64>,
     /// A scrub in progress on the timeline ruler.
     pub scrubbing: bool,
     /// The middle button is held and panning the timeline.
@@ -357,6 +379,10 @@ impl RoughcutApp {
             timeline_offset: 0.0,
             timeline_scroll_to: None,
             dragging_item: None,
+            selected_audio: None,
+            dragging_audio: None,
+            audio_bed: None,
+            bed_pending: None,
             scrubbing: false,
             panning: false,
             still_tick: None,
@@ -892,6 +918,11 @@ impl RoughcutApp {
             // Delete removes whatever is in the region you are looking at.
             Action::RippleDelete => match self.focus {
                 Focus::Source => self.remove_selected_clip(),
+                // A selected sound is what the key means; otherwise it is the
+                // clip under the playhead, as before.
+                Focus::Timeline if self.selected_audio.is_some() => {
+                    self.delete_selected_audio()
+                }
                 Focus::Timeline => self.ripple_delete(),
             },
             Action::TrimHead => self.trim(true),
@@ -1295,7 +1326,8 @@ impl RoughcutApp {
         let Some(drag) = self.trim_drag.take() else {
             return;
         };
-        if !self.edit(|p| timeline::trim_edge(p, drag.index, drag.edge, drag.delta)) {
+        let mode = self.ripple_mode();
+        if !self.edit(|p| timeline::trim_edge_with(p, drag.index, drag.edge, drag.delta, mode)) {
             return;
         }
         self.selected_item = Some(drag.index);
@@ -1309,6 +1341,207 @@ impl RoughcutApp {
         };
         self.set_position(at);
         self.force_media_jump = true;
+    }
+
+    // --- audio tracks -------------------------------------------------------
+
+    /// What the audio tracks currently amount to.
+    ///
+    /// Muting is in here because a muted track changes the bed, and the frame
+    /// rate is because every position converts through it.
+    fn audio_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let fps = self.project.fps();
+        fps.num.hash(&mut h);
+        fps.den.hash(&mut h);
+        for track in &self.project.audio {
+            track.muted.hash(&mut h);
+            for item in track.items() {
+                item.clip_id.hash(&mut h);
+                item.in_frame.hash(&mut h);
+                item.out_frame.hash(&mut h);
+                item.start.hash(&mut h);
+                if let Some(clip) = self.project.clip(item.clip_id) {
+                    clip.path.hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
+
+    /// Rebuild the preview bed if the audio tracks have changed.
+    ///
+    /// Called after every audio edit rather than every frame: mixing is
+    /// hundreds of milliseconds, and doing it on a pass that happens on every
+    /// keypress would be absurd. The signature check makes a redundant call
+    /// free, so callers do not have to be careful.
+    pub fn sync_audio_bed(&mut self) {
+        let signature = self.audio_signature();
+        if self
+            .audio_bed
+            .as_ref()
+            .is_some_and(|(s, p)| *s == signature && p.exists())
+            || self.bed_pending == Some(signature)
+        {
+            return;
+        }
+
+        let fps = self.project.fps();
+        let seconds = |frames: i64| frames as f64 * fps.den as f64 / fps.num.max(1) as f64;
+        let mut pieces = Vec::new();
+        for track in &self.project.audio {
+            if track.muted {
+                continue;
+            }
+            for item in track.items() {
+                let Some(clip) = self.project.clip(item.clip_id) else {
+                    continue;
+                };
+                if !clip.has_audio {
+                    continue;
+                }
+                pieces.push(roughcut_core::audio::MixPiece {
+                    path: clip.playback_path().to_path_buf(),
+                    from: seconds(item.in_frame),
+                    // Exclusive end: `out` is the last frame kept, so the
+                    // sound runs to the far side of it.
+                    to: seconds(item.out_frame + 1),
+                    at: seconds(item.start),
+                });
+            }
+        }
+
+        if pieces.is_empty() {
+            self.audio_bed = None;
+            self.bed_pending = None;
+            self.monitor.set_bed(None);
+            return;
+        }
+        let Some(dir) = crate::settings::config_dir().map(|d| d.join("beds")) else {
+            return;
+        };
+        self.bed_pending = Some(signature);
+        self.workers.submit(Job::MixBed {
+            signature,
+            pieces,
+            dest: dir.join(format!("bed-{signature:016x}.wav")),
+        });
+    }
+
+    /// Add an empty audio track, named the way Shotcut names them.
+    pub fn add_audio_track(&mut self) {
+        let name = format!("A{}", self.project.audio.len() + 1);
+        self.edit(|p| {
+            p.audio.push(roughcut_core::audio::AudioTrack::new(name.clone()));
+            true
+        });
+        self.set_status(format!("added {name}"), StatusKind::Info);
+    }
+
+    pub fn remove_audio_track(&mut self, track: usize) {
+        if track >= self.project.audio.len() {
+            return;
+        }
+        self.edit(|p| {
+            p.audio.remove(track);
+            true
+        });
+        self.selected_audio = None;
+        self.sync_audio_bed();
+    }
+
+    pub fn toggle_audio_mute(&mut self, track: usize) {
+        if self.edit(|p| match p.audio.get_mut(track) {
+            Some(t) => {
+                t.muted = !t.muted;
+                true
+            }
+            None => false,
+        }) {
+            self.sync_audio_bed();
+        }
+    }
+
+    /// Put a bin clip onto an audio lane at `frame`.
+    pub fn drop_audio_at(&mut self, clip_id: ClipId, track: usize, frame: i64) {
+        let Some((in_frame, out_frame)) =
+            self.project.clip(clip_id).and_then(|c| c.marked_range())
+        else {
+            self.set_status("that clip has no usable range", StatusKind::Warn);
+            return;
+        };
+        if self.project.clip(clip_id).is_some_and(|c| !c.has_audio) {
+            self.set_status("that clip has no sound in it", StatusKind::Warn);
+            return;
+        }
+        let item = roughcut_core::audio::AudioItem {
+            clip_id,
+            in_frame,
+            out_frame,
+            start: frame.max(0),
+        };
+        let mut placed = None;
+        let ok = self.edit(|p| match p.audio.get_mut(track) {
+            Some(t) => {
+                placed = t.place(item);
+                placed.is_some()
+            }
+            None => false,
+        });
+        if ok {
+            self.selected_audio = placed.map(|i| (track, i));
+            self.sync_audio_bed();
+        }
+    }
+
+    /// Move a dragged audio item to where it was let go.
+    pub fn commit_audio_drag(&mut self) {
+        let Some(drag) = self.dragging_audio.take() else {
+            return;
+        };
+        if drag.delta == 0 && drag.to_track == drag.track {
+            return;
+        }
+        let Some(item) = self
+            .project
+            .audio
+            .get(drag.track)
+            .and_then(|t| t.items().get(drag.index))
+            .copied()
+        else {
+            return;
+        };
+        let moved = roughcut_core::audio::AudioItem {
+            start: (item.start + drag.delta).max(0),
+            ..item
+        };
+        let to = drag.to_track.min(self.project.audio.len().saturating_sub(1));
+        let mut placed = None;
+        let ok = self.edit(|p| {
+            // Off the old track first, so a move within one track cannot
+            // overwrite the very item being moved.
+            p.audio[drag.track].remove(drag.index);
+            placed = p.audio[to].place(moved);
+            placed.is_some()
+        });
+        if ok {
+            self.selected_audio = placed.map(|i| (to, i));
+            self.sync_audio_bed();
+        }
+    }
+
+    pub fn delete_selected_audio(&mut self) {
+        let Some((track, index)) = self.selected_audio else {
+            return;
+        };
+        if self.edit(|p| match p.audio.get_mut(track) {
+            Some(t) => t.remove(index).is_some(),
+            None => false,
+        }) {
+            self.selected_audio = None;
+            self.sync_audio_bed();
+        }
     }
 
     pub fn commit_mark_drag(&mut self) {
@@ -1334,7 +1567,8 @@ impl RoughcutApp {
             return;
         };
         let start = timeline::item_start(&self.project.timeline, idx);
-        if self.edit(|p| timeline::ripple_delete(p, idx)) {
+        let mode = self.ripple_mode();
+        if self.edit(|p| timeline::ripple_delete_with(p, idx, mode)) {
             let last = timeline::last_frame(&self.project.timeline);
             self.playhead = start.min(last);
             self.selected_item = if self.project.timeline.is_empty() {
@@ -1351,11 +1585,12 @@ impl RoughcutApp {
             return;
         };
         let at = self.playhead;
+        let mode = self.ripple_mode();
         let ok = self.edit(|p| {
             if head {
-                timeline::trim_head(p, idx, at)
+                timeline::trim_head_with(p, idx, at, mode)
             } else {
-                timeline::trim_tail(p, idx, at)
+                timeline::trim_tail_with(p, idx, at, mode)
             }
         });
         if ok {
@@ -2151,6 +2386,23 @@ impl RoughcutApp {
                         self.set_status(format!("{e:#}"), StatusKind::Error);
                     }
                 },
+                JobResult::BedMixed { signature, result } => {
+                    if self.bed_pending == Some(signature) {
+                        self.bed_pending = None;
+                    }
+                    match result {
+                        Ok(path) => {
+                            // Only if it is still the bed that is wanted: an
+                            // edit made while it was mixing has already queued
+                            // the next one.
+                            if signature == self.audio_signature() {
+                                self.monitor.set_bed(Some(path.clone()));
+                                self.audio_bed = Some((signature, path));
+                            }
+                        }
+                        Err(e) => self.set_status(format!("audio: {e:#}"), StatusKind::Warn),
+                    }
+                }
                 JobResult::Transcribed { clip_id, result } => {
                     self.transcribing.remove(&clip_id);
                     match result {
@@ -2271,6 +2523,28 @@ impl RoughcutApp {
     /// adopted rather than rebuilt. Turning them off leaves the files alone —
     /// they are a cache, and the next time this is switched on they are still
     /// there.
+    /// Whether the sound under the picture moves when the picture is cut.
+    fn ripple_mode(&self) -> timeline::Ripple {
+        if self.settings.ripple_all_tracks {
+            timeline::Ripple::AllTracks
+        } else {
+            timeline::Ripple::PictureOnly
+        }
+    }
+
+    pub fn set_ripple_all_tracks(&mut self, on: bool) {
+        self.settings.ripple_all_tracks = on;
+        self.settings.save();
+        self.set_status(
+            if on {
+                "edits now move the sound under them"
+            } else {
+                "edits now leave the sound where it is"
+            },
+            StatusKind::Info,
+        );
+    }
+
     pub fn set_proxies_enabled(&mut self, on: bool) {
         self.settings.proxies_enabled = on;
         self.settings.save();

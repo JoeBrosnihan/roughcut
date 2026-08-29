@@ -87,6 +87,9 @@ pub struct Monitor {
     pub seek_latencies_ms: Vec<f64>,
     fps: Rational,
     volume: f64,
+    /// The audio tracks, flattened to one file, played underneath whatever is
+    /// on screen. `None` when there are no audio tracks.
+    bed: Option<PathBuf>,
     /// Repaint hook handed to mpv's wakeup and render-update callbacks.
     repaint: Arc<dyn Fn() + Send + Sync>,
 }
@@ -107,6 +110,7 @@ impl Monitor {
             last_reverse_tick: None,
             pending: None,
             corrected_for: None,
+            bed: None,
             seek_latencies_ms: Vec::new(),
             fps: Rational::new(30000, 1001),
             volume: 80.0,
@@ -215,6 +219,7 @@ impl Monitor {
                         // loud as well as showing in the alert bar.
                         None => log::warn!("hardware decode unavailable — decoding in software"),
                     }
+                    self.apply_bed();
                     let resume = matches!(self.transport, Transport::Forward(_));
                     let seek_to = self.pending_seek.take();
                     let fps = self.fps;
@@ -283,6 +288,74 @@ impl Monitor {
         self.show_impl(path, frame, true);
     }
 
+    /// Play `bed` under everything, or nothing if `None`.
+    ///
+    /// mpv only takes an external audio file at load time, so changing the bed
+    /// means reopening what is playing. That is why this is not called every
+    /// frame: `sync_audio_bed` compares signatures first.
+    pub fn set_bed(&mut self, bed: Option<PathBuf>) {
+        if self.bed == bed {
+            return;
+        }
+        self.bed = bed;
+        self.reload();
+    }
+
+    /// Mix the bed in with the clip audio.
+    ///
+    /// Must run after the file is open. Set as a startup option instead, mpv
+    /// silently fails to load the file at all.
+    ///
+    /// The track ids are looked up rather than assumed. Naming `aid1` and
+    /// `aid2` does not survive real footage: every iPhone clip here carries a
+    /// second four-channel `apple_apac` spatial track that mpv cannot decode,
+    /// and blindly taking the second audio track picks that instead of the
+    /// bed, whereupon the graph collapses and there is no sound at all.
+    fn apply_bed(&mut self) {
+        let Some(player) = &self.player else { return };
+        if self.bed.is_none() {
+            // Leaving a stale graph in place would keep mixing a file that is
+            // no longer part of the project.
+            let _ = player.set_property_string("lavfi-complex", "");
+            return;
+        }
+
+        let Some(count) = player.get_i64("track-list/count") else {
+            return;
+        };
+        let (mut clip, mut bed) = (None, None);
+        for n in 0..count {
+            if player.get_string(&format!("track-list/{n}/type")).as_deref() != Some("audio") {
+                continue;
+            }
+            let Some(id) = player.get_i64(&format!("track-list/{n}/id")) else {
+                continue;
+            };
+            if player
+                .get_flag(&format!("track-list/{n}/external"))
+                .unwrap_or(false)
+            {
+                bed.get_or_insert(id);
+            } else {
+                clip.get_or_insert(id);
+            }
+        }
+
+        let graph = match (clip, bed) {
+            (Some(c), Some(b)) => {
+                // `normalize=0`, or adding a music track would halve the
+                // volume of everything that was already there.
+                format!("[aid{c}] [aid{b}] amix=inputs=2:normalize=0 [ao]")
+            }
+            // A clip with no sound of its own: the bed is all there is.
+            (None, Some(b)) => format!("[aid{b}] anull [ao]"),
+            _ => return,
+        };
+        if let Err(e) = player.set_property_string("lavfi-complex", &graph) {
+            log::warn!("cannot mix the audio bed: {e}");
+        }
+    }
+
     /// Forget which file is loaded, so the next `show` opens it afresh.
     ///
     /// Needed when the bytes behind a path have changed underneath mpv — the
@@ -301,6 +374,16 @@ impl Monitor {
 
         let needs_load = self.loaded.as_deref() != Some(path);
         if needs_load {
+            // Attached before the load, because that is the only time mpv
+            // will take it.
+            let _ = player.set_property_string(
+                "audio-files",
+                &self
+                    .bed
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
             if let Err(e) = player.load_file(path) {
                 log::warn!("cannot open {}: {e}", path.display());
                 return;

@@ -6,6 +6,38 @@
 
 use crate::model::{ClipId, Project, TimelineItem};
 
+/// Whether an edit to the picture drags the sound under it along.
+///
+/// Off by default, matching Shotcut, and the one place a mode is worth its
+/// keep: there is genuinely no right answer. An effect pinned to the moment a
+/// door slams *should* move when footage before it is removed, or everything
+/// after that point is out of sync. A music bed should not, because a song
+/// does not lose four seconds from its middle because a shot was shortened.
+/// Which of those you meant is not something the program can work out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ripple {
+    /// Only the picture moves.
+    #[default]
+    PictureOnly,
+    /// Sound after the edit point moves with it.
+    AllTracks,
+}
+
+/// Move every audio item at or after `from` by `delta`.
+///
+/// One function rather than a line at each of the five edits that shift
+/// downstream positions: audio carries a stored `start`, and a stored position
+/// that five call sites have to remember to update is one that will eventually
+/// be wrong.
+fn ripple_audio(project: &mut Project, mode: Ripple, from: i64, delta: i64) {
+    if mode == Ripple::PictureOnly || delta == 0 {
+        return;
+    }
+    for track in &mut project.audio {
+        track.ripple(from, delta);
+    }
+}
+
 /// Total length of the assembled sequence, in frames.
 pub fn total_frames(timeline: &[TimelineItem]) -> i64 {
     timeline.iter().map(|i| i.len()).sum()
@@ -117,11 +149,24 @@ pub fn insert_at(
     in_frame: i64,
     out_frame: i64,
 ) -> Option<i64> {
+    insert_at_with(project, playhead, clip_id, in_frame, out_frame, Ripple::default())
+}
+
+pub fn insert_at_with(
+    project: &mut Project,
+    playhead: i64,
+    clip_id: ClipId,
+    in_frame: i64,
+    out_frame: i64,
+    mode: Ripple,
+) -> Option<i64> {
     let item = make_item(project, clip_id, in_frame, out_frame)?;
     let playhead = playhead.max(0);
     let total = total_frames(&project.timeline);
 
     if playhead >= total {
+        // Landing past the end pushes nothing along, so there is nothing to
+        // ripple: the sound under the existing cut does not move.
         project.timeline.push(item);
         return Some(total);
     }
@@ -132,22 +177,40 @@ pub fn insert_at(
     let index = item_at(&project.timeline, playhead)
         .map(|(i, _)| i)
         .unwrap_or(project.timeline.len());
+    let added = item.len();
     project.timeline.insert(index, item);
+    ripple_audio(project, mode, playhead, added);
     Some(playhead)
 }
 
 /// Remove an item and close the gap.
 pub fn ripple_delete(project: &mut Project, index: usize) -> bool {
+    ripple_delete_with(project, index, Ripple::default())
+}
+
+pub fn ripple_delete_with(project: &mut Project, index: usize, mode: Ripple) -> bool {
     if index >= project.timeline.len() {
         return false;
     }
+    let at = item_start(&project.timeline, index);
+    let removed = project.timeline[index].len();
     project.timeline.remove(index);
+    ripple_audio(project, mode, at, -removed);
     true
 }
 
 /// Trim the head of `index` so its first frame lands at `playhead`.
 /// The clip shortens and everything after it ripples earlier.
 pub fn trim_head(project: &mut Project, index: usize, playhead: i64) -> bool {
+    trim_head_with(project, index, playhead, Ripple::default())
+}
+
+pub fn trim_head_with(
+    project: &mut Project,
+    index: usize,
+    playhead: i64,
+    mode: Ripple,
+) -> bool {
     let Some(item) = project.timeline.get(index).copied() else {
         return false;
     };
@@ -158,12 +221,22 @@ pub fn trim_head(project: &mut Project, index: usize, playhead: i64) -> bool {
         return false;
     }
     project.timeline[index].in_frame = item.in_frame + offset;
+    ripple_audio(project, mode, start, -offset);
     true
 }
 
 /// Trim the tail of `index` so its last frame is the one before `playhead`.
 /// The clip shortens and everything after it ripples earlier.
 pub fn trim_tail(project: &mut Project, index: usize, playhead: i64) -> bool {
+    trim_tail_with(project, index, playhead, Ripple::default())
+}
+
+pub fn trim_tail_with(
+    project: &mut Project,
+    index: usize,
+    playhead: i64,
+    mode: Ripple,
+) -> bool {
     let Some(item) = project.timeline.get(index).copied() else {
         return false;
     };
@@ -173,7 +246,9 @@ pub fn trim_tail(project: &mut Project, index: usize, playhead: i64) -> bool {
     if offset <= 0 || offset >= item.len() {
         return false;
     }
+    let lost = item.len() - offset;
     project.timeline[index].out_frame = item.in_frame + offset - 1;
+    ripple_audio(project, mode, start + item.len(), -lost);
     true
 }
 
@@ -218,17 +293,33 @@ pub fn clamp_trim(project: &Project, index: usize, edge: Edge, delta: i64) -> i6
 /// rather than being refused outright — which is what dragging an edge past
 /// the end of its footage should feel like.
 pub fn trim_edge(project: &mut Project, index: usize, edge: Edge, delta: i64) -> bool {
+    trim_edge_with(project, index, edge, delta, Ripple::default())
+}
+
+pub fn trim_edge_with(
+    project: &mut Project,
+    index: usize,
+    edge: Edge,
+    delta: i64,
+    mode: Ripple,
+) -> bool {
     let delta = clamp_trim(project, index, edge, delta);
     if delta == 0 {
         return false;
     }
+    let start = item_start(&project.timeline, index);
+    let was = project.timeline[index].len();
     let Some(item) = project.timeline.get_mut(index) else {
         return false;
     };
     match edge {
+        // A head pulled later shortens the clip and everything after it moves
+        // earlier; pulled earlier it lengthens and they move later.
         Edge::Head => item.in_frame += delta,
         Edge::Tail => item.out_frame += delta,
     }
+    let grew = project.timeline[index].len() - was;
+    ripple_audio(project, mode, start + was, grew);
     true
 }
 
@@ -519,6 +610,117 @@ mod tests {
         assert_eq!(clamp_trim(&p, 7, Edge::Head, 10), 0);
         assert!(!trim_edge(&mut p, 7, Edge::Head, 10));
         assert!(!trim_edge(&mut p, 0, Edge::Head, 0));
+    }
+
+    // --- audio under the picture ------------------------------------------
+    //
+    // Audio carries a stored start, unlike the video track whose positions are
+    // derived. These pin every edit that shifts downstream positions, because
+    // one that forgets is a silent desync nobody notices until the export.
+
+    use crate::audio::{AudioItem, AudioTrack};
+
+    /// A project with 100+100+100 frames of picture and a sound at 250.
+    fn with_sound() -> (Project, ClipId) {
+        let (mut p, id) = project_with(&[(0, 99), (0, 99), (0, 99)]);
+        let mut track = AudioTrack::new("A1");
+        track.place(AudioItem {
+            clip_id: id,
+            in_frame: 0,
+            out_frame: 49,
+            start: 250,
+        });
+        p.audio.push(track);
+        (p, id)
+    }
+
+    fn sound_at(p: &Project) -> i64 {
+        p.audio[0].items()[0].start
+    }
+
+    #[test]
+    fn by_default_editing_the_picture_leaves_the_sound_alone() {
+        let (mut p, _) = with_sound();
+        assert!(ripple_delete(&mut p, 0));
+        assert_eq!(sound_at(&p), 250, "a bed does not move when a shot is cut");
+
+        let (mut p, _) = with_sound();
+        assert!(trim_head(&mut p, 0, 40));
+        assert_eq!(sound_at(&p), 250);
+
+        let (mut p, _) = with_sound();
+        assert!(trim_edge(&mut p, 0, Edge::Tail, -30));
+        assert_eq!(sound_at(&p), 250);
+    }
+
+    #[test]
+    fn ripple_all_tracks_drags_the_sound_along() {
+        // Deleting the first hundred frames pulls the sound back by a hundred.
+        let (mut p, _) = with_sound();
+        assert!(ripple_delete_with(&mut p, 0, Ripple::AllTracks));
+        assert_eq!(sound_at(&p), 150);
+
+        // Trimming forty frames off a head does the same, by forty.
+        let (mut p, _) = with_sound();
+        assert!(trim_head_with(&mut p, 0, 40, Ripple::AllTracks));
+        assert_eq!(sound_at(&p), 210);
+
+        // Trimming a tail shortens the clip; the sound follows.
+        let (mut p, _) = with_sound();
+        assert!(trim_tail_with(&mut p, 0, 70, Ripple::AllTracks));
+        assert_eq!(sound_at(&p), 220);
+    }
+
+    #[test]
+    fn dragging_an_edge_moves_the_sound_both_ways() {
+        let (mut p, _) = with_sound();
+        assert!(trim_edge_with(&mut p, 0, Edge::Tail, -30, Ripple::AllTracks));
+        assert_eq!(sound_at(&p), 220, "shortened, so the sound comes earlier");
+
+        // And back out again, giving the frames back.
+        assert!(trim_edge_with(&mut p, 0, Edge::Tail, 30, Ripple::AllTracks));
+        assert_eq!(sound_at(&p), 250, "round trip returns it exactly");
+    }
+
+    #[test]
+    fn inserting_pushes_the_sound_later() {
+        let (mut p, id) = with_sound();
+        // Fifty frames dropped in at the very start.
+        assert_eq!(
+            insert_at_with(&mut p, 0, id, 0, 49, Ripple::AllTracks),
+            Some(0)
+        );
+        assert_eq!(sound_at(&p), 300);
+
+        // Appending past the end pushes nothing: there is nothing after it.
+        let (mut p, id) = with_sound();
+        let end = total_frames(&p.timeline);
+        insert_at_with(&mut p, end, id, 0, 49, Ripple::AllTracks);
+        assert_eq!(sound_at(&p), 250);
+    }
+
+    /// A sound before the edit point is not after it, and must not move.
+    #[test]
+    fn only_what_comes_after_the_edit_moves() {
+        let (mut p, id) = with_sound();
+        p.audio[0].place(AudioItem {
+            clip_id: id,
+            in_frame: 0,
+            out_frame: 19,
+            start: 10,
+        });
+        // Delete the *second* clip, which starts at 100.
+        assert!(ripple_delete_with(&mut p, 1, Ripple::AllTracks));
+        let starts: Vec<i64> = p.audio[0].items().iter().map(|i| i.start).collect();
+        assert_eq!(starts, vec![10, 150], "the early one stayed put");
+    }
+
+    #[test]
+    fn a_project_with_no_audio_is_unaffected_either_way() {
+        let (mut p, _) = project_with(&[(0, 99), (0, 99)]);
+        assert!(ripple_delete_with(&mut p, 0, Ripple::AllTracks));
+        assert!(p.audio.is_empty());
+        assert_eq!(total_frames(&p.timeline), 100);
     }
 
     #[test]

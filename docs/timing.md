@@ -240,6 +240,61 @@ order to work through a bin, and entirely the wrong one when you have just
 opened the hundredth clip: nothing is cancelled or re-run, the job that is
 already waiting simply goes first.
 
+## Sound with no picture
+
+Audio tracks hold music, voiceover and effects. A video clip keeps its own
+sound welded to its picture; these are for everything else.
+
+They differ from the video track in exactly one structural way, and it is the
+one that matters. The video track is gapless, so a clip position is the sum of
+the lengths before it — derived, never stored, and therefore incapable of
+desynchronising. Audio has gaps: an effect sits at the moment it happens and
+there is silence either side. So an audio item carries its own `start`, which
+is a stored position, which is a thing that can go wrong.
+
+Five edits shift downstream positions — `insert_at`, `ripple_delete`,
+`trim_head`, `trim_tail`, `trim_edge` — and each one routes through a single
+`ripple_audio`, rather than five call sites each remembering. Whether it does
+anything is the **Ripple all tracks** toggle, off by default, matching Shotcut.
+That is the one mode worth its keep here, because there is genuinely no right
+answer: an effect pinned to a door slam should follow a cut; a music bed should
+not lose four seconds from its middle because a shot was shortened.
+
+### The preview plays one pre-mixed bed
+
+An mpv EDL concatenates; it does not mix. Two things follow.
+
+First, the audio tracks are flattened to a single WAV by ffmpeg — `atrim`,
+`adelay`, `amix` — and mpv plays that alongside the picture. One decoder rather
+than one per piece: a project with fifty effects would otherwise ask mpv for
+fifty, running for the whole timeline. Measured at **444 ms for twenty-four
+pieces across ten minutes**, and redone only when a signature of the tracks
+actually changes.
+
+Second, mixing that bed with the clip audio is `lavfi-complex`, and two things
+about it had to be measured rather than assumed:
+
+- **It must be set after the file loads.** As a startup option, mpv silently
+  fails to load the file at all.
+- **The graph cannot name `aid1` and `aid2` blindly.** Every iPhone clip
+  sampled here carries a second four-channel `apple_apac` spatial track that
+  mpv cannot decode. Taking the second audio track picks that instead of the
+  bed, and the graph collapses to "Audio: no audio". The first *internal* track
+  is the clip; the *external* one is the bed.
+
+Verified by frequency rather than by ear: a 300 Hz clip mixed with a 1000 Hz
+bed came out at -17.1 dB and -17.8 dB, both present. `amix` is given
+`normalize=0`, or adding a second sound would quietly halve the first.
+
+### Export
+
+An audio track is an ordinary playlist with `hide="video"` on its entry in the
+tractor, gaps written as `<blank>`, and a `mix` transition of its own — without
+that transition the track is in the XML and silent in the render. The programme
+runs as long as the longest track, so a bed outlasting the last shot is not cut
+off. Both are covered in `tests/audio_tracks.rs`, which renders through melt and
+measures the tones that come back.
+
 ## Variable frame rate
 
 Phones shoot it constantly, and it breaks the one agreement everything else

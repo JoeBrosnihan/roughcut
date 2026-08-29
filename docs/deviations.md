@@ -110,3 +110,17 @@ It runs on one dedicated thread, never more, because whisper holds over a
 gigabyte of model in VRAM and four at once do not fit on a 10 GB card. Idle
 still costs nothing: that thread sleeps on the same condvar as the rest and
 wakes only when a clip is waiting. Requested by the user.
+
+**16. There are audio tracks, which the brief did not have.** §9 describes one
+video track and nothing else, and video compositing was declined outright — two
+decoded streams blended per frame in the preview is a render pipeline, and mpv
+cannot do it at all. Audio is not the same problem: mpv mixes natively and MLT
+was already multi-track, down to a `mix` transition this program has always
+written. The measurements are in [timing.md](timing.md).
+
+What it did cost is the one thing the brief's model was built to prevent. Every
+position in a Roughcut project is derived, never stored, so ripple edits cannot
+desynchronise. Audio has gaps and therefore a stored `start`. It is funnelled
+through a single function that five edits call, and covered by tests at each of
+them, but the guarantee is now maintained rather than structural. Requested by
+the user.

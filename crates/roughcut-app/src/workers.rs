@@ -14,6 +14,7 @@ use roughcut_core::proxy;
 use roughcut_core::rotate::{self, Turn};
 use roughcut_core::time::{frame_to_seconds, Rational};
 use roughcut_core::tools::{quiet_command, Tools};
+use roughcut_core::audio::{self, MixPiece};
 use roughcut_core::transcript::{self, Transcript};
 use roughcut_core::waveform;
 use roughcut_core::whisper;
@@ -118,6 +119,12 @@ pub enum Job {
         path: PathBuf,
         cache_dir: Option<PathBuf>,
     },
+    /// Flatten the audio tracks into one file for the preview to play.
+    MixBed {
+        signature: u64,
+        pieces: Vec<MixPiece>,
+        dest: PathBuf,
+    },
     /// What is said in a clip, and when.
     Transcribe {
         clip_id: ClipId,
@@ -179,6 +186,10 @@ pub enum JobResult {
         clip_id: ClipId,
         result: Result<Transcript>,
     },
+    BedMixed {
+        signature: u64,
+        result: Result<PathBuf>,
+    },
 }
 
 struct Queue {
@@ -197,7 +208,12 @@ impl Job {
             // A waveform is only ever asked for about the clip open in the
             // monitor right now, which makes it the definition of work
             // somebody is waiting on.
-            Job::Probe { .. } | Job::Rotate { .. } | Job::Waveform { .. } => Priority::High,
+            // The bed is what the preview plays. Waiting on it behind a
+            // queue of thumbnails would mean editing in silence.
+            Job::Probe { .. }
+            | Job::Rotate { .. }
+            | Job::Waveform { .. }
+            | Job::MixBed { .. } => Priority::High,
             Job::Thumbs { tiles, .. } if *tiles <= 1 => Priority::High,
             Job::Transcribe { .. } => Priority::Slow,
             Job::Thumbs { .. } | Job::Proxy { .. } => Priority::Low,
@@ -533,6 +549,17 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             };
             JobResult::Waved { clip_id, result }
         }
+        Job::MixBed {
+            signature,
+            pieces,
+            dest,
+        } => {
+            let result = match &shared.tools.ffmpeg {
+                Some(ffmpeg) => mix_bed(ffmpeg, &pieces, &dest),
+                None => Err(anyhow::anyhow!("ffmpeg is not available")),
+            };
+            JobResult::BedMixed { signature, result }
+        }
         Job::Transcribe {
             clip_id,
             path,
@@ -542,6 +569,36 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             JobResult::Transcribed { clip_id, result }
         }
     }
+}
+
+/// Render the audio tracks down to one file.
+///
+/// Already there means already correct: the name carries a signature of every
+/// item that went into it, so an existing file cannot be stale.
+fn mix_bed(
+    ffmpeg: &std::path::Path,
+    pieces: &[MixPiece],
+    dest: &std::path::Path,
+) -> Result<PathBuf> {
+    if dest.is_file() {
+        return Ok(dest.to_path_buf());
+    }
+    let args = audio::mix_args(pieces, dest).context("nothing to mix")?;
+    if let Some(dir) = dest.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let output = quiet_command(ffmpeg)
+        .args(args)
+        .output()
+        .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(dest);
+        bail!(
+            "could not mix the audio tracks: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(dest.to_path_buf())
 }
 
 /// A clip transcript, cached on disk between sessions.

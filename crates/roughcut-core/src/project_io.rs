@@ -250,6 +250,59 @@ mod tests {
         p
     }
 
+    /// Audio positions are stored rather than derived, so unlike every other
+    /// position in the project they can be lost in a save.
+    #[test]
+    fn audio_tracks_survive_a_save() {
+        use crate::audio::{AudioItem, AudioTrack};
+        let dir = tmpdir("audio");
+        let path = dir.join("p.roughcut");
+        let mut p = sample();
+        let clip_id = p.clips[0].id;
+
+        let mut track = AudioTrack::new("A1");
+        track.place(AudioItem {
+            clip_id,
+            in_frame: 10,
+            out_frame: 109,
+            start: 500,
+        });
+        track.muted = true;
+        p.audio.push(track);
+
+        save(&p, &path).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(p, back);
+
+        let item = back.audio[0].items()[0];
+        assert_eq!(item.start, 500, "the one position that is not derived");
+        assert_eq!((item.in_frame, item.out_frame), (10, 109));
+        assert!(back.audio[0].muted, "muting is part of the project");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every project saved before audio tracks existed has no `audio` key at
+    /// all, and must still open.
+    #[test]
+    fn a_project_written_before_audio_tracks_still_opens() {
+        let dir = tmpdir("legacy");
+        let path = dir.join("old.roughcut");
+        let p = sample();
+        save(&p, &path).unwrap();
+
+        // Strip the key back out, which is exactly what an older file is.
+        let text = fs::read_to_string(&path).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        json.as_object_mut().unwrap().remove("audio");
+        assert!(json.get("audio").is_none());
+        fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+        let back = load(&path).expect("an older project must still open");
+        assert!(back.audio.is_empty());
+        assert_eq!(back.timeline, p.timeline);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn round_trips_through_json() {
         let dir = tmpdir("roundtrip");

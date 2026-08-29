@@ -121,6 +121,8 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     let mut open_recent: Option<std::path::PathBuf> = None;
     let mut clear_recents = false;
     let mut toggle_proxies: Option<bool> = None;
+    let mut toggle_ripple: Option<bool> = None;
+    let mut add_audio = false;
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.horizontal_centered(|ui| {
@@ -147,6 +149,24 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
                 ui.separator();
                 if menu_item(ui, "Export MLT XML…", "Ctrl+E") {
                     action = Some(Action::ExportMlt);
+                }
+                ui.separator();
+                if menu_item(ui, "Add audio track", "") {
+                    add_audio = true;
+                }
+                // Off by default, matching Shotcut. The one mode worth
+                // keeping, because there is no right answer: an effect pinned
+                // to a moment should follow a cut, a music bed should not.
+                let mut ripple = app.settings.ripple_all_tracks;
+                if ui
+                    .checkbox(&mut ripple, "Ripple all tracks")
+                    .on_hover_text(
+                        "When the picture is cut, move the sound under it too. \
+                         Off, sound stays where it was laid.",
+                    )
+                    .changed()
+                {
+                    toggle_ripple = Some(ripple);
                 }
                 ui.separator();
                 // The one setting worth a menu entry: it is the difference
@@ -186,6 +206,12 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
 
     if let Some(on) = toggle_proxies {
         app.set_proxies_enabled(on);
+    }
+    if let Some(on) = toggle_ripple {
+        app.set_ripple_all_tracks(on);
+    }
+    if add_audio {
+        app.add_audio_track();
     }
     if recover {
         app.recover_last_session();

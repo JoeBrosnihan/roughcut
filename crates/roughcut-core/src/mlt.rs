@@ -106,7 +106,11 @@ pub fn to_xml(project: &Project, opts: &ExportOptions) -> Result<String> {
             .map(|(_, s)| s.as_str())
     };
 
-    let total = timeline::total_frames(&project.timeline);
+    // The longest of everything, not just the picture. A music bed running
+    // past the last shot is part of the programme, and a background sized to
+    // the video alone would cut it off.
+    let total = timeline::total_frames(&project.timeline)
+        .max(project.audio.iter().map(|t| t.end()).max().unwrap_or(0));
     // A zero-length timeline still needs a legal background: one frame.
     let track_len = total.max(1);
     let track_out = track_len - 1;
@@ -221,6 +225,37 @@ pub fn to_xml(project: &Project, opts: &ExportOptions) -> Result<String> {
     }
     w.write_event(Event::End(BytesEnd::new("playlist")))?;
 
+    // --- audio tracks -------------------------------------------------------
+    //
+    // An audio track is an ordinary playlist; `hide="video"` on its entry in
+    // the tractor is what makes MLT ignore the picture of whatever is on it.
+    // Gaps are real here, unlike the video track, so they are written out as
+    // `<blank>` — the same way Shotcut represents silence.
+    for (t, track) in project.audio.iter().enumerate() {
+        let mut pl = BytesStart::new("playlist");
+        let id = format!("playlist{}", t + 1);
+        pl.push_attribute(("id", id.as_str()));
+        w.write_event(Event::Start(pl))?;
+        prop(&mut w, "shotcut:video", "0")?;
+        prop(&mut w, "shotcut:audio", "1")?;
+        prop(&mut w, "shotcut:name", &track.name)?;
+
+        let mut at = 0i64;
+        for item in track.items() {
+            if item.start > at {
+                let mut blank = BytesStart::new("blank");
+                blank.push_attribute(("length", fmt(item.start - at).as_str()));
+                w.write_event(Event::Empty(blank))?;
+            }
+            let Some(chain_id) = chain_id_of(item.clip_id) else {
+                anyhow::bail!("an audio track references a clip that is not in the bin");
+            };
+            entry(&mut w, chain_id, &fmt(item.in_frame), &fmt(item.out_frame))?;
+            at = item.end();
+        }
+        w.write_event(Event::End(BytesEnd::new("playlist")))?;
+    }
+
     // --- tractor ------------------------------------------------------------
     let mut tractor = BytesStart::new("tractor");
     tractor.push_attribute(("id", "tractor0"));
@@ -238,6 +273,15 @@ pub fn to_xml(project: &Project, opts: &ExportOptions) -> Result<String> {
     let mut t1 = BytesStart::new("track");
     t1.push_attribute(("producer", "playlist0"));
     w.write_event(Event::Empty(t1))?;
+    for t in 0..project.audio.len() {
+        let mut track = BytesStart::new("track");
+        let id = format!("playlist{}", t + 1);
+        track.push_attribute(("producer", id.as_str()));
+        // The producers are ordinary chains with pictures; this is what makes
+        // the track audio-only.
+        track.push_attribute(("hide", "video"));
+        w.write_event(Event::Empty(track))?;
+    }
 
     // Shotcut writes these two for every video track above the background.
     // Without them the track is silent and composites wrongly on reopen.
@@ -264,6 +308,23 @@ pub fn to_xml(project: &Project, opts: &ExportOptions) -> Result<String> {
             ("disable", "1"),
         ],
     )?;
+
+    // Every track above the background needs its own audio sum, or it is
+    // simply not heard. Verified by rendering: without these the second track
+    // is present in the XML and absent from the output.
+    for t in 0..project.audio.len() {
+        transition(
+            &mut w,
+            &format!("transition{}", t + 2),
+            &[
+                ("a_track", "0"),
+                ("b_track", &(t + 2).to_string()),
+                ("mlt_service", "mix"),
+                ("always_active", "1"),
+                ("sum", "1"),
+            ],
+        )?;
+    }
 
     w.write_event(Event::End(BytesEnd::new("tractor")))?;
     w.write_event(Event::End(BytesEnd::new("mlt")))?;
@@ -362,6 +423,7 @@ mod tests {
         let a = ClipId::new();
         let b = ClipId::new();
         Project {
+            audio: Vec::new(),
             version: 1,
             profile: Profile::default(),
             clips: vec![

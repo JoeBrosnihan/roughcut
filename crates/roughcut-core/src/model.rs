@@ -3,6 +3,7 @@
 //! Deliberately small and `Clone`-cheap: undo snapshots the entire `Project`.
 
 use crate::time::{inclusive_len, Rational};
+use crate::audio::AudioTrack;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -249,6 +250,11 @@ pub struct Project {
     pub clips: Vec<SourceClip>,
     /// The single video track, in order.
     pub timeline: Vec<TimelineItem>,
+    /// Sound with no picture of its own: music, voiceover, effects. Absent
+    /// from projects written before audio tracks existed, which is what the
+    /// default is for.
+    #[serde(default)]
+    pub audio: Vec<AudioTrack>,
 }
 
 impl Default for Project {
@@ -258,6 +264,7 @@ impl Default for Project {
             profile: Profile::default(),
             clips: Vec::new(),
             timeline: Vec::new(),
+            audio: Vec::new(),
         }
     }
 }

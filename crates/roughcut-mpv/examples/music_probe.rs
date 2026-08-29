@@ -65,24 +65,46 @@ fn main() -> anyhow::Result<()> {
         let mut f = std::fs::File::create(&edl_path)?;
         writeln!(f, "# mpv EDL v0")?;
         writeln!(f, "%{}%{},0.000000,3.000000", s.len(), s)?;
-        writeln!(f, "%{}%{},10.000000,3.000000", s.len(), s)?;
+        writeln!(f, "%{}%{},4.000000,3.000000", s.len(), s)?;
     }
 
-    // Three attempts, least ambitious first, so a failure says which layer
-    // could not do it rather than just "no".
-    let modes: [(&str, bool, bool); 2] = [
-        ("EDL + external audio, lavfi-complex set BEFORE load", true, true),
-        ("EDL + external audio, lavfi-complex set AFTER load", true, false),
-    ];
     let lib = Arc::new(MpvLib::load()?);
-    for (name, add_music, mix) in modes {
-        println!("\n=== {name}");
-        match attempt(&lib, &edl_path, music, &out, add_music, mix) {
-            Ok(()) => {}
-            Err(e) => println!("RESULT: {e:#}"),
-        }
+    match attempt(&lib, &edl_path, music, &out) {
+        Ok(()) => {}
+        Err(e) => println!("RESULT: {e:#}"),
     }
     Ok(())
+}
+
+/// The audio tracks mpv is offering: the clip and the bed, by id.
+///
+/// Naming `aid1` and `aid2` blindly does not work on real footage. Every
+/// iPhone clip here carries a second four-channel `apple_apac` spatial track
+/// that mpv cannot decode, so the blind graph picks that as the clip audio and
+/// collapses to "Audio: no audio". The first *internal* track is the usable
+/// one; the external file is the bed.
+fn pick_tracks(player: &Player) -> Option<(i64, i64)> {
+    let count = player.get_i64("track-list/count")?;
+    let (mut clip, mut bed) = (None, None);
+    for n in 0..count {
+        if player.get_string(&format!("track-list/{n}/type")).as_deref() != Some("audio") {
+            continue;
+        }
+        let id = player.get_i64(&format!("track-list/{n}/id"))?;
+        let external = player
+            .get_flag(&format!("track-list/{n}/external"))
+            .unwrap_or(false);
+        let codec = player
+            .get_string(&format!("track-list/{n}/codec"))
+            .unwrap_or_default();
+        println!("   track {n}: id={id} external={external} codec={codec}");
+        if external {
+            bed.get_or_insert(id);
+        } else {
+            clip.get_or_insert(id);
+        }
+    }
+    Some((clip?, bed?))
 }
 
 fn attempt(
@@ -90,8 +112,6 @@ fn attempt(
     edl_path: &std::path::Path,
     music: &std::path::Path,
     out: &std::path::Path,
-    add_music: bool,
-    mix: bool,
 ) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(out);
     let player = Player::new(lib.clone())?;
@@ -104,26 +124,26 @@ fn attempt(
     // Render as fast as it will go; this is not a listening test.
     player.set_option("audio-wait-open", "0")?;
 
-    // The music is an external audio track laid over the cut.
-    if add_music {
-        player.set_option("audio-files", &music.to_string_lossy())?;
-    }
-    // Play both at once. Without this mpv selects one audio track and the
-    // other is simply not heard.
-    if mix {
-        player.set_option("lavfi-complex", "[aid1] [aid2] amix=inputs=2 [ao]")?;
-    }
+    // The bed is an external audio track laid over the cut.
+    player.set_option("audio-files", &music.to_string_lossy())?;
 
     player.load_file(edl_path)?;
     if !wait_loaded(&player, 10) {
         drain_log(&player);
         anyhow::bail!("never loaded");
     }
-    if !mix {
-        match player.set_property_string("lavfi-complex", "[aid1] [aid2] amix=inputs=2 [ao]") {
-            Ok(()) => println!("   lavfi-complex accepted after load"),
-            Err(e) => println!("   lavfi-complex refused after load: {e}"),
+    // Only after the file is open: as a startup option it prevents the file
+    // loading at all, silently.
+    match pick_tracks(&player) {
+        Some((clip, bed)) => {
+            let graph = format!("[aid{clip}] [aid{bed}] amix=inputs=2:normalize=0 [ao]");
+            println!("   graph: {graph}");
+            match player.set_property_string("lavfi-complex", &graph) {
+                Ok(()) => println!("   accepted"),
+                Err(e) => println!("   refused: {e}"),
+            }
         }
+        None => println!("   could not find both a clip track and a bed track"),
     }
     println!(
         "loaded. duration {:?}  tracks {:?}",

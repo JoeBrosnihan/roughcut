@@ -8,16 +8,76 @@ use roughcut_core::model::ClipId;
 use roughcut_core::time::format_timecode;
 use roughcut_core::timeline::{self as tl, Edge};
 
+/// Height with no audio tracks. Unchanged from before they existed, so a
+/// project without sound looks exactly as it did.
 pub const TIMELINE_HEIGHT: f32 = 160.0;
 const RULER_HEIGHT: f32 = 18.0;
 const BLOCK_TOP: f32 = 26.0;
 const BLOCK_HEIGHT: f32 = 92.0;
 /// How close the pointer has to be to a cut to take hold of the edge there.
 const EDGE_GRAB: f32 = 6.0;
+/// An audio lane. Shorter than the picture: a sound is identified by where it
+/// sits and what its envelope looks like, not by a thumbnail.
+const AUDIO_LANE_H: f32 = 36.0;
+const LANE_GAP: f32 = 4.0;
+
+/// How tall the whole panel needs to be for `tracks` audio lanes.
+pub fn panel_height(tracks: usize) -> f32 {
+    TIMELINE_HEIGHT + tracks as f32 * (AUDIO_LANE_H + LANE_GAP)
+}
+
+/// Which horizontal band of the timeline a point is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    Video,
+    Audio(usize),
+}
+
+/// Top and height of the picture lane.
+fn video_lane(canvas: Rect) -> (f32, f32) {
+    (canvas.top() + BLOCK_TOP, BLOCK_HEIGHT)
+}
+
+/// Top and height of audio lane `i`, counting down from under the picture.
+fn audio_lane(canvas: Rect, i: usize) -> (f32, f32) {
+    let (vt, vh) = video_lane(canvas);
+    (
+        vt + vh + LANE_GAP + i as f32 * (AUDIO_LANE_H + LANE_GAP),
+        AUDIO_LANE_H,
+    )
+}
+
+fn lane_rect(canvas: Rect, lane: Lane) -> Rect {
+    let (top, h) = match lane {
+        Lane::Video => video_lane(canvas),
+        Lane::Audio(i) => audio_lane(canvas, i),
+    };
+    Rect::from_min_max(
+        egui::pos2(canvas.left(), top),
+        egui::pos2(canvas.right(), top + h),
+    )
+}
+
+/// The lane a y coordinate falls in, if any. Everything else — the ruler, the
+/// gaps, the strip under the last lane — is scrub territory.
+fn lane_at(canvas: Rect, y: f32, tracks: usize) -> Option<Lane> {
+    let (vt, vh) = video_lane(canvas);
+    if y >= vt && y <= vt + vh {
+        return Some(Lane::Video);
+    }
+    for i in 0..tracks {
+        let (t, h) = audio_lane(canvas, i);
+        if y >= t && y <= t + h {
+            return Some(Lane::Audio(i));
+        }
+    }
+    None
+}
 
 pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
+    let panel_h = panel_height(app.project.audio.len());
     egui::TopBottomPanel::bottom("timeline")
-        .exact_height(TIMELINE_HEIGHT)
+        .exact_height(panel_h)
         .frame(
             egui::Frame::new()
                 .fill(theme::PANEL)
@@ -71,12 +131,13 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
             let output = area
                 .show(ui, |ui| {
                     let (canvas, response) = ui.allocate_exact_size(
-                        egui::vec2(content_width, TIMELINE_HEIGHT - 4.0),
+                        egui::vec2(content_width, panel_h - 4.0),
                         Sense::click_and_drag(),
                     );
                     draw(app, ui, canvas, px_per_frame);
                     handle_drag(app, ui, &response, canvas, px_per_frame);
                     handle_click(app, &response, canvas, px_per_frame);
+                    lane_menu(app, &response, canvas);
                     canvas
                 });
             // Remembered so the next wheel zoom knows where it is starting.
@@ -89,20 +150,25 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
             if dragging_clip(ui.ctx()).is_some() {
                 if let Some(pos) = ui.ctx().pointer_latest_pos() {
                     if rect.contains(pos) {
-                        let frame = snap_to_cut(
-                            app,
-                            frame_at_x(pos.x, canvas, px_per_frame, app),
-                            px_per_frame,
-                        );
+                        let lane = lane_at(canvas, pos.y, app.project.audio.len());
+                        // Sound lands where you put it; picture snaps to a cut,
+                        // because dropping between two shots is what is nearly
+                        // always meant.
+                        let raw = frame_at_x(pos.x, canvas, px_per_frame, app);
+                        let frame = match lane {
+                            Some(Lane::Audio(_)) => raw.max(0),
+                            _ => snap_to_cut(app, raw, px_per_frame),
+                        };
                         let x = canvas.left() + frame as f32 * px_per_frame;
+                        let bottom = match lane {
+                            Some(Lane::Audio(t)) => lane_rect(canvas, Lane::Audio(t)).bottom(),
+                            _ => rect.top() + BLOCK_TOP + BLOCK_HEIGHT,
+                        };
                         painter.line_segment(
-                            [
-                                egui::pos2(x, rect.top() + RULER_HEIGHT),
-                                egui::pos2(x, rect.top() + BLOCK_TOP + BLOCK_HEIGHT),
-                            ],
+                            [egui::pos2(x, rect.top() + RULER_HEIGHT), egui::pos2(x, bottom)],
                             egui::Stroke::new(2.0, theme::MARK_IN),
                         );
-                        accept_drop(app, ui, rect, frame);
+                        accept_drop_on(app, ui, rect, frame, lane);
                     }
                 }
             }
@@ -205,9 +271,10 @@ fn pan_input(app: &mut RoughcutApp, ui: &egui::Ui, rect: Rect, total: i64, usabl
     app.timeline_scroll_to = Some(target);
 }
 
-/// The band the clip blocks occupy. Above it is the ruler, below it is empty.
+/// The band the picture blocks occupy.
 fn is_on_blocks(y: f32, canvas: Rect) -> bool {
-    y >= canvas.top() + BLOCK_TOP && y <= canvas.top() + BLOCK_TOP + BLOCK_HEIGHT
+    let (top, h) = video_lane(canvas);
+    y >= top && y <= top + h
 }
 
 /// The clip edge within grabbing distance of `x`, if any.
@@ -279,17 +346,56 @@ fn handle_drag(
         }
     }
 
+    let tracks = app.project.audio.len();
     if response.drag_started() {
-        match origin().or_else(|| response.interact_pointer_pos()) {
-            Some(p) if is_on_blocks(p.y, canvas) => {
-                match edge_at(app, p.x, canvas, px_per_frame) {
+        if let Some(p) = origin().or_else(|| response.interact_pointer_pos()) {
+            match lane_at(canvas, p.y, tracks) {
+                Some(Lane::Video) => match edge_at(app, p.x, canvas, px_per_frame) {
                     Some((index, edge)) => app.grab_trim(index, edge),
                     None => app.dragging_item = index_at(app, p.x),
+                },
+                Some(Lane::Audio(t)) => {
+                    let frame = frame_at_x(p.x, canvas, px_per_frame, app);
+                    match app.project.audio[t].item_at(frame) {
+                        Some(index) => {
+                            app.selected_audio = Some((t, index));
+                            app.dragging_audio = Some(crate::app::AudioDrag {
+                                track: t,
+                                index,
+                                delta: 0,
+                                to_track: t,
+                            });
+                        }
+                        // Empty lane: nothing to pick up, so scrub.
+                        None => app.scrubbing = true,
+                    }
+                }
+                // The ruler and the gaps between lanes are scrub territory.
+                None => app.scrubbing = true,
+            }
+        }
+    }
+
+    // Moving a sound wins over everything else once begun.
+    if app.dragging_audio.is_some() {
+        if response.dragged() {
+            if let (Some(p), Some(o)) = (response.interact_pointer_pos(), origin()) {
+                let delta = ((p.x - o.x) / px_per_frame.max(1e-6)).round() as i64;
+                let to = match lane_at(canvas, p.y, tracks) {
+                    Some(Lane::Audio(t)) => t,
+                    _ => app.dragging_audio.map(|d| d.track).unwrap_or(0),
+                };
+                if let Some(drag) = app.dragging_audio.as_mut() {
+                    drag.delta = delta;
+                    drag.to_track = to;
                 }
             }
-            Some(_) => app.scrubbing = true,
-            None => {}
+            paint_audio_ghost(app, ui, canvas, px_per_frame);
         }
+        if response.drag_stopped() {
+            app.commit_audio_drag();
+        }
+        return;
     }
 
     // Retrimming wins over everything: it was started on an edge, and an edge
@@ -437,6 +543,93 @@ fn paint_trim(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, ppf: f32) {
     );
 }
 
+/// Right-clicking an audio lane: the two things you can do to a whole track.
+///
+/// On the lane rather than in a header column, because a permanent gutter
+/// would cost width on every timeline forever to hold two controls used twice
+/// a session.
+fn lane_menu(app: &mut RoughcutApp, response: &egui::Response, canvas: Rect) {
+    let tracks = app.project.audio.len();
+    if tracks == 0 {
+        return;
+    }
+    let Some(pos) = response.hover_pos() else {
+        return;
+    };
+    let Some(Lane::Audio(t)) = lane_at(canvas, pos.y, tracks) else {
+        return;
+    };
+    let (mut mute, mut remove) = (false, false);
+    response.context_menu(|ui| {
+        ui.set_min_width(150.0);
+        let name = app.project.audio[t].name.clone();
+        ui.label(egui::RichText::new(&name).strong());
+        ui.separator();
+        if ui
+            .button(if app.project.audio[t].muted {
+                "Unmute"
+            } else {
+                "Mute"
+            })
+            .clicked()
+        {
+            mute = true;
+            ui.close();
+        }
+        if ui.button("Remove track").clicked() {
+            remove = true;
+            ui.close();
+        }
+    });
+    if mute {
+        app.toggle_audio_mute(t);
+    }
+    if remove {
+        app.remove_audio_track(t);
+    }
+}
+
+/// Where a dragged sound would land.
+fn paint_audio_ghost(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, ppf: f32) {
+    let Some(drag) = app.dragging_audio else { return };
+    let Some(item) = app
+        .project
+        .audio
+        .get(drag.track)
+        .and_then(|t| t.items().get(drag.index))
+    else {
+        return;
+    };
+    let lane = lane_rect(canvas, Lane::Audio(drag.to_track.min(app.project.audio.len() - 1)));
+    let start = (item.start + drag.delta).max(0);
+    let block = Rect::from_min_max(
+        egui::pos2(canvas.left() + start as f32 * ppf, lane.top() + 1.0),
+        egui::pos2(
+            canvas.left() + (start + item.len()) as f32 * ppf,
+            lane.bottom() - 1.0,
+        ),
+    );
+    let painter = ui.painter_at(canvas);
+    painter.rect_filled(
+        block,
+        CornerRadius::same(theme::CLIP_RADIUS),
+        theme::ACCENT.linear_multiply(0.35),
+    );
+    painter.rect_stroke(
+        block,
+        CornerRadius::same(theme::CLIP_RADIUS),
+        Stroke::new(2.0, theme::ACCENT),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        block.left_top() + egui::vec2(4.0, 1.0),
+        egui::Align2::LEFT_TOP,
+        format_timecode(start, app.fps()),
+        egui::FontId::monospace(9.0),
+        theme::TEXT,
+    );
+}
+
 /// The bin clip currently being dragged, if any.
 fn dragging_clip(ctx: &egui::Context) -> Option<ClipId> {
     egui::DragAndDrop::payload::<ClipId>(ctx).map(|id| *id)
@@ -463,6 +656,20 @@ fn snap_to_cut(app: &RoughcutApp, frame: i64, px_per_frame: f32) -> i64 {
 
 /// Complete a drag if the pointer was released over `zone`.
 fn accept_drop(app: &mut RoughcutApp, ui: &egui::Ui, zone: Rect, frame: i64) {
+    accept_drop_on(app, ui, zone, frame, None)
+}
+
+/// Complete a drag if the pointer was released over `zone`.
+///
+/// `lane` says which band it came down in, so the same gesture puts picture on
+/// the video track and sound on an audio track without a separate control.
+fn accept_drop_on(
+    app: &mut RoughcutApp,
+    ui: &egui::Ui,
+    zone: Rect,
+    frame: i64,
+    lane: Option<Lane>,
+) {
     let Some(clip_id) = dragging_clip(ui.ctx()) else {
         return;
     };
@@ -473,7 +680,10 @@ fn accept_drop(app: &mut RoughcutApp, ui: &egui::Ui, zone: Rect, frame: i64) {
         .is_some_and(|p| zone.contains(p));
     if released && over {
         egui::DragAndDrop::clear_payload(ui.ctx());
-        app.drop_clip_at(clip_id, frame);
+        match lane {
+            Some(Lane::Audio(t)) => app.drop_audio_at(clip_id, t, frame),
+            _ => app.drop_clip_at(clip_id, frame),
+        }
     }
 }
 
@@ -533,6 +743,66 @@ fn paint_block_filmstrip(
         CornerRadius::same(theme::CLIP_RADIUS),
         egui::Color32::from_black_alpha(90),
     );
+}
+
+/// Paint the part of a clip envelope that this item actually uses.
+///
+/// The peaks are the ones already extracted for the scrub bar — 2048 buckets
+/// across the whole source — so this costs an index and no decoding. An audio
+/// block with no shape in it is indistinguishable from any other rectangle,
+/// which is exactly the thing a timeline is supposed to tell you at a glance.
+fn paint_audio_envelope(
+    app: &RoughcutApp,
+    painter: &egui::Painter,
+    block: Rect,
+    canvas: Rect,
+    item: &roughcut_core::audio::AudioItem,
+    muted: bool,
+) {
+    let Some(peaks) = app.waveforms.get(&item.clip_id) else {
+        return;
+    };
+    let Some(clip) = app.project.clip(item.clip_id) else {
+        return;
+    };
+    if peaks.is_empty() || block.width() < 2.0 || clip.duration_frames <= 0 {
+        return;
+    }
+
+    let clipped = painter.with_clip_rect(block.intersect(canvas));
+    let mid = block.center().y;
+    let half = (block.height() / 2.0 - 2.0).max(1.0);
+    let colour = if muted {
+        theme::LINE
+    } else {
+        theme::WAVEFORM
+    };
+
+    // Only the visible span, so a block thousands of pixels wide costs the
+    // width of the window rather than its own.
+    let from = block.left().max(canvas.left()).max(painter.clip_rect().left());
+    let to = block.right().min(canvas.right()).min(painter.clip_rect().right());
+    let mut x = from.floor();
+    let mut shapes = Vec::new();
+    while x < to {
+        // Which source frame this column shows, and therefore which bucket.
+        let t = ((x - block.left()) / block.width()).clamp(0.0, 1.0);
+        let source = item.in_frame + (t * (item.len() - 1).max(1) as f32) as i64;
+        let bucket = ((source.clamp(0, clip.duration_frames - 1) as f64
+            / clip.duration_frames as f64)
+            * peaks.len() as f64) as usize;
+        let peak = peaks[bucket.min(peaks.len() - 1)];
+        if peak > 0 {
+            let h = (peak as f32 / 255.0) * half;
+            shapes.push(egui::Shape::rect_filled(
+                Rect::from_min_max(egui::pos2(x, mid - h), egui::pos2(x + 1.0, mid + h)),
+                CornerRadius::ZERO,
+                colour,
+            ));
+        }
+        x += 1.0;
+    }
+    clipped.extend(shapes);
 }
 
 fn draw(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, px_per_frame: f32) {
@@ -632,17 +902,85 @@ fn draw(app: &RoughcutApp, ui: &egui::Ui, canvas: Rect, px_per_frame: f32) {
         }
     }
 
+    // --- audio lanes --------------------------------------------------------
+    for (t, track) in app.project.audio.iter().enumerate() {
+        let lane = lane_rect(canvas, Lane::Audio(t));
+        painter.rect_filled(lane, CornerRadius::ZERO, theme::PANEL_ALT);
+
+        // The name sits in the lane itself rather than in a header column: a
+        // fixed left gutter would cost width on every timeline forever, and
+        // there are only ever a handful of tracks to tell apart.
+        painter.text(
+            egui::pos2(canvas.left().max(ui.clip_rect().left()) + 4.0, lane.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            if track.muted {
+                format!("{} (muted)", track.name)
+            } else {
+                track.name.clone()
+            },
+            egui::FontId::proportional(9.0),
+            theme::TEXT_DIM,
+        );
+
+        for (i, item) in track.items().iter().enumerate() {
+            let block = Rect::from_min_max(
+                egui::pos2(x_of(item.start), lane.top() + 1.0),
+                egui::pos2(x_of(item.end()), lane.bottom() - 1.0),
+            );
+            if block.right() < canvas.left() || block.left() > canvas.right() {
+                continue;
+            }
+            let selected = app.selected_audio == Some((t, i));
+            let fill = if track.muted {
+                theme::PANEL
+            } else if selected {
+                theme::CLIP_SELECTED
+            } else {
+                theme::CLIP
+            };
+            painter.rect_filled(block, CornerRadius::same(theme::CLIP_RADIUS), fill);
+            paint_audio_envelope(app, &painter, block, canvas, item, track.muted);
+            painter.rect_stroke(
+                block,
+                CornerRadius::same(theme::CLIP_RADIUS),
+                Stroke::new(
+                    if selected { 2.0 } else { 1.0 },
+                    if selected { theme::ACCENT } else { theme::LINE },
+                ),
+                StrokeKind::Inside,
+            );
+            if block.width() > 44.0 {
+                let name = app
+                    .project
+                    .clip(item.clip_id)
+                    .map(|c| c.file_name())
+                    .unwrap_or_else(|| "?".into());
+                painter.text(
+                    block.left_top() + egui::vec2(4.0, 1.0),
+                    egui::Align2::LEFT_TOP,
+                    crate::ui::truncate_middle(&name, ((block.width() - 8.0) / 5.6) as usize),
+                    egui::FontId::proportional(9.0),
+                    theme::TEXT_DIM,
+                );
+            }
+        }
+    }
+
     // --- playhead -----------------------------------------------------------
     let px = x_of(app.playhead);
+    let lanes_bottom = match app.project.audio.len() {
+        0 => canvas.top() + BLOCK_TOP + BLOCK_HEIGHT,
+        n => lane_rect(canvas, Lane::Audio(n - 1)).bottom(),
+    };
     painter.line_segment(
         [
             egui::pos2(px, canvas.top() + RULER_HEIGHT - 4.0),
-            egui::pos2(px, canvas.top() + BLOCK_TOP + BLOCK_HEIGHT + 6.0),
+            egui::pos2(px, lanes_bottom + 6.0),
         ],
         Stroke::new(2.0, theme::PLAYHEAD),
     );
     painter.text(
-        egui::pos2(px + 4.0, canvas.top() + BLOCK_TOP + BLOCK_HEIGHT + 8.0),
+        egui::pos2(px + 4.0, lanes_bottom + 8.0),
         egui::Align2::LEFT_TOP,
         format_timecode(app.playhead, fps),
         egui::FontId::monospace(10.0),
@@ -658,6 +996,14 @@ fn handle_click(app: &mut RoughcutApp, response: &egui::Response, canvas: Rect, 
         return;
     };
     let frame = ((pos.x - canvas.left()) / ppf.max(1e-6)).round() as i64;
+
+    // Clicking a sound selects it and does not move the playhead: the two
+    // would fight, and selecting is what you came for.
+    if let Some(Lane::Audio(t)) = lane_at(canvas, pos.y, app.project.audio.len()) {
+        app.selected_audio = app.project.audio[t].item_at(frame).map(|i| (t, i));
+        return;
+    }
+    app.selected_audio = None;
     app.focus = Focus::Timeline;
     // Set focus first: `set_position` clamps against whichever region has it.
     app.scrub_to(frame);

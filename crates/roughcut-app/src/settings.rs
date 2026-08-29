@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     /// §10: proxies are optional and off by default.
     pub proxies_enabled: bool,
+    /// Whether an edit to the picture drags the sound under it along. Off by
+    /// default, matching Shotcut, because a music bed should stay where it is
+    /// while an effect pinned to a moment should not.
+    #[serde(default)]
+    pub ripple_all_tracks: bool,
     /// `None` means "beside the project file, in .roughcut-proxies".
     pub proxy_dir: Option<PathBuf>,
     pub ffprobe_path: Option<PathBuf>,
@@ -62,6 +67,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             proxies_enabled: false,
+            ripple_all_tracks: false,
             proxy_dir: None,
             ffprobe_path: None,
             ffmpeg_path: None,

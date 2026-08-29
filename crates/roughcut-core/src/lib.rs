@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod audio;
 pub mod import;
 pub mod mlt;
 pub mod model;
