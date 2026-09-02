@@ -370,6 +370,11 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         .hover_pos()
         .filter(|p| thumb.contains(*p))
         .map(|p| ((p.x - thumb.left()) / thumb.width()).clamp(0.0, 1.0));
+    // Pointing at a clip is the strongest possible statement about which sheet
+    // is wanted next.
+    if hover_x.is_some() {
+        app.request_scrub_sheet(id);
+    }
     if let Some(t) = app.thumb(id) {
         // The tile under the pointer. A sheet has one per pixel of the
         // thumbnail's width, so a single pixel of movement lands on a

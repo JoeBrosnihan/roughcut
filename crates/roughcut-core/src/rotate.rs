@@ -172,15 +172,47 @@ fn replace(temp: &Path, path: &Path) -> Result<()> {
         path.extension().map(|e| e.to_string_lossy()).unwrap_or_default()
     ));
     let _ = std::fs::remove_file(&backup);
-    std::fs::rename(path, &backup)
+    rename_when_free(path, &backup)
         .with_context(|| format!("cannot move {} aside", path.display()))?;
-    if let Err(e) = std::fs::rename(temp, path) {
+    if let Err(e) = rename_when_free(temp, path) {
         let _ = std::fs::rename(&backup, path);
         let _ = std::fs::remove_file(temp);
         return Err(e).with_context(|| format!("cannot put the rotated {} in place", path.display()));
     }
     let _ = std::fs::remove_file(&backup);
     Ok(())
+}
+
+/// How long to wait for whoever else has the file to finish with it.
+///
+/// Windows refuses to rename a file another process holds open, and on any
+/// bin of real size something usually does: a thumbnail being sampled, an
+/// envelope being read, the audio being extracted for a transcript. All of
+/// them are reads that finish on their own in seconds, so the answer is to
+/// wait rather than to fail — the alternative is telling somebody their clip
+/// cannot be rotated when in truth it could be a moment later.
+///
+/// Two seconds is past the longest of those reads and short enough that a
+/// genuinely stuck file still reports promptly.
+const RENAME_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Rename, waiting out another process that has the file open.
+fn rename_when_free(from: &Path, to: &Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + RENAME_PATIENCE;
+    let mut wait = std::time::Duration::from_millis(20);
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(wait);
+                // Back off, so a long read is not polled hundreds of times.
+                wait = (wait * 2).min(std::time::Duration::from_millis(250));
+            }
+        }
+    }
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
@@ -211,6 +243,73 @@ mod tests {
             .expect("cannot run ffmpeg");
         assert!(status.success());
         out
+    }
+
+    /// The failure the user actually hit: a rotation refused because some
+    /// other process still had the clip open.
+    ///
+    /// Reproduced with a real reader rather than a Rust `File`, deliberately.
+    /// Rust opens files with `FILE_SHARE_DELETE`, which permits the rename and
+    /// so would not reproduce this at all; ffmpeg does not, which is why a
+    /// thumbnail or a transcript being read was enough to stop a rotation.
+    #[cfg(windows)]
+    #[test]
+    fn a_rotation_waits_for_whoever_else_has_the_file() {
+        let Some(ffmpeg) = Tools::discover().ffmpeg else {
+            eprintln!("SKIPPED: ffmpeg is required");
+            return;
+        };
+        let dir = std::env::temp_dir().join("roughcut-rotate-busy");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = asymmetric_clip(&ffmpeg, &dir);
+        let target = dir.join("moved.mp4");
+
+        // A reader that holds the file for about half a second, the way a
+        // waveform or a transcript extraction does.
+        let mut reader = quiet_command(&ffmpeg)
+            .args(["-v", "error", "-re", "-i"])
+            .arg(&clip)
+            .args(["-t", "0.5", "-f", "null", "-"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cannot run ffmpeg");
+
+        // Immediately, while it is definitely still reading.
+        let started = std::time::Instant::now();
+        let result = rename_when_free(&clip, &target);
+        let waited = started.elapsed();
+        let _ = reader.wait();
+
+        assert!(
+            result.is_ok(),
+            "gave up on a file that was only briefly busy: {result:?}"
+        );
+        assert!(target.is_file(), "the rename reported success but did nothing");
+        assert!(
+            waited < RENAME_PATIENCE,
+            "waited the full patience ({waited:?}), so it never actually succeeded early"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Patience is bounded: a file nothing will ever release still reports.
+    #[test]
+    fn a_rename_that_can_never_work_still_gives_up() {
+        let dir = std::env::temp_dir().join("roughcut-rotate-nope");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("not-here.mp4");
+
+        let started = std::time::Instant::now();
+        let result = rename_when_free(&missing, &dir.join("x.mp4"));
+        assert!(result.is_err(), "renamed a file that does not exist");
+        // It waited, but it did stop.
+        assert!(started.elapsed() < RENAME_PATIENCE * 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

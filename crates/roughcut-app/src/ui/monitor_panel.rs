@@ -254,6 +254,11 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
                 if let Some((_, cur)) = app.mark_drag.as_mut() {
                     *cur = f;
                 }
+                // Follow the pointer while marking. Choosing where a range
+                // ends without seeing the frame it ends on is guesswork, and
+                // the whole reason for marking on the bar rather than by
+                // stepping is to be able to see it.
+                app.scrub_to(f);
             }
         }
         if response.drag_stopped() {
@@ -349,6 +354,16 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
         Stroke::new(2.0, theme::PLAYHEAD),
     );
 
+    // A picture of whatever is under the pointer, so a stretch of clip can be
+    // found by moving across it rather than by seeking to each guess and
+    // waiting for a decode. Costs a textured quad from the sheet already in
+    // memory, and only while the pointer is actually over the bar.
+    if let Some(pos) = response.hover_pos() {
+        if !response.dragged() {
+            hover_thumbnail(app, &painter, rect, track, pos, total, clip_id);
+        }
+    }
+
     // The one position readout in the application: where the playhead is, and
     // how long the thing under it runs for.
     let fps = app.fps();
@@ -365,6 +380,70 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
         format_timecode(total, fps),
         egui::FontId::monospace(10.0),
         theme::TEXT_DIM,
+    );
+}
+
+/// Width of the picture that follows the pointer along the scrub bar.
+const HOVER_W: f32 = 172.0;
+
+/// Show the frame under the pointer, above the bar.
+///
+/// Deliberately from the filmstrip sheet rather than from mpv. A sheet holds
+/// 112 frames of the clip and is already resident, so this follows the pointer
+/// exactly; asking mpv would mean a decode per pixel and a picture that lags
+/// by most of a second. It is a coarse preview and reads as one — the sharp
+/// frame is the one in the monitor, which the playhead is still driving.
+fn hover_thumbnail(
+    app: &mut RoughcutApp,
+    painter: &egui::Painter,
+    rect: Rect,
+    track: Rect,
+    pos: Pos2,
+    total: i64,
+    clip_id: Option<roughcut_core::ClipId>,
+) {
+    let Some(id) = clip_id else { return };
+    app.request_scrub_sheet(id);
+    let Some(thumb) = app.sheets.get(&id).filter(|t| t.tiles > 1) else {
+        return;
+    };
+    let Some(duration) = app.project.clip(id).map(|c| c.duration_frames) else {
+        return;
+    };
+    let frame = frame_at(pos, track, total);
+    let tile = crate::workers::tile_for_frame(frame, duration, thumb.tiles);
+
+    let h = HOVER_W / thumb.tile_aspect().max(0.05);
+    // Above the bar, and kept inside the window at either end.
+    let x = pos.x.clamp(rect.left() + HOVER_W / 2.0, rect.right() - HOVER_W / 2.0);
+    let frame_rect = Rect::from_center_size(
+        egui::pos2(x, rect.top() - h / 2.0 - 8.0),
+        egui::vec2(HOVER_W, h),
+    );
+    painter.rect_filled(
+        frame_rect.expand(2.0),
+        egui::CornerRadius::same(2),
+        theme::VIDEO_LETTERBOX,
+    );
+    painter.image(
+        thumb.tex.id(),
+        frame_rect,
+        thumb.uv(tile),
+        egui::Color32::WHITE,
+    );
+    painter.rect_stroke(
+        frame_rect.expand(2.0),
+        egui::CornerRadius::same(2),
+        Stroke::new(1.0, theme::LINE),
+        egui::StrokeKind::Inside,
+    );
+    // The time it is showing, so the picture is not the only thing to go on.
+    painter.text(
+        frame_rect.center_bottom() + egui::vec2(0.0, -2.0),
+        egui::Align2::CENTER_BOTTOM,
+        format_timecode(frame, app.fps()),
+        egui::FontId::monospace(10.0),
+        theme::TEXT,
     );
 }
 

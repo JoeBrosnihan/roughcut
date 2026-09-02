@@ -360,6 +360,28 @@ impl Monitor {
         }
     }
 
+    /// Let go of `path` if it is the file currently open.
+    ///
+    /// mpv holds an open handle to whatever it is showing, and Windows will
+    /// not let a file be renamed while another process has it open. Rewriting
+    /// a clip on disk therefore has to start by putting it down.
+    ///
+    /// Returns true if it was actually holding that file.
+    pub fn release(&mut self, path: &Path) -> bool {
+        if self.loaded.as_deref() != Some(path) {
+            return false;
+        }
+        if let Some(p) = &self.player {
+            let _ = p.stop();
+        }
+        self.loaded = None;
+        self.pending_seek = None;
+        self.requested_frame = None;
+        self.reported_frame = None;
+        self.transport = Transport::Paused;
+        true
+    }
+
     /// Forget which file is loaded, so the next `show` opens it afresh.
     ///
     /// Needed when the bytes behind a path have changed underneath mpv — the

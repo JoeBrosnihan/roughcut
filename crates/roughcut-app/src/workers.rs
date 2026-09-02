@@ -364,6 +364,28 @@ impl WorkerPool {
         true
     }
 
+    /// Move a clip scrub sheet to the front of the background queue.
+    ///
+    /// Every visible tile asks for one, and each is a hundred-odd frames of
+    /// ffmpeg, so on a full bin the sheet for the clip actually under the
+    /// pointer sits behind twenty others and skimming does nothing. Same
+    /// treatment as a transcript: nothing is cancelled or re-run, the job
+    /// already waiting simply goes first.
+    pub fn prioritise_sheet(&self, clip_id: ClipId) -> bool {
+        let mut q = self.shared.queue.lock().unwrap();
+        let Some(at) = q.low.iter().position(|j| {
+            matches!(j, Job::Thumbs { clip_id: c, tiles, .. } if *c == clip_id && *tiles > 1)
+        }) else {
+            return false;
+        };
+        if at > 0 {
+            if let Some(job) = q.low.remove(at) {
+                q.low.push_front(job);
+            }
+        }
+        true
+    }
+
     /// Drop everything not yet started, e.g. when a project is closed.
     pub fn clear_queue(&self) {
         let mut q = self.shared.queue.lock().unwrap();
@@ -1296,6 +1318,45 @@ mod tests {
         const NORMAL: u32 = 0x0000_0020;
         assert_eq!(bg, BELOW_NORMAL, "background work is not deprioritised");
         assert_eq!(fg, NORMAL, "foreground work should not be slowed down");
+    }
+
+    /// Skimming a full bin is worthless if the sheet for the clip under the
+    /// pointer is twentieth in line.
+    #[test]
+    fn the_clip_under_the_pointer_jumps_the_sheet_queue() {
+        let pool = WorkerPool::new(egui::Context::default(), Tools::default());
+        pool.set_suspended(true);
+        let ids: Vec<ClipId> = (0..4).map(|_| ClipId::new()).collect();
+        for id in &ids {
+            pool.submit(Job::Thumbs {
+                clip_id: *id,
+                path: PathBuf::from("a.mp4"),
+                duration_frames: 100,
+                fps: Rational::new(30, 1),
+                tiles: SCRUB_TILES,
+                still: false,
+                cache_dir: None,
+            });
+        }
+        assert!(pool.prioritise_sheet(ids[2]));
+        let first = match pool.shared.queue.lock().unwrap().low.front() {
+            Some(Job::Thumbs { clip_id, .. }) => *clip_id,
+            other => panic!("unexpected head of queue: {other:?}"),
+        };
+        assert_eq!(first, ids[2]);
+
+        // A poster is not a sheet, and must not be dragged about by this.
+        let poster = ClipId::new();
+        pool.submit(Job::Thumbs {
+            clip_id: poster,
+            path: PathBuf::from("b.mp4"),
+            duration_frames: 100,
+            fps: Rational::new(30, 1),
+            tiles: 1,
+            still: false,
+            cache_dir: None,
+        });
+        assert!(!pool.prioritise_sheet(poster), "a poster is not on the low queue");
     }
 
     #[test]

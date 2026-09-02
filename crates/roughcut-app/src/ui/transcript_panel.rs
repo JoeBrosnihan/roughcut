@@ -22,9 +22,13 @@ pub fn show(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: egui::Rect) {
     painter.rect_filled(rect, egui::CornerRadius::ZERO, theme::BG);
 
     let Some((clip_id, transcript)) = app.current_transcript().map(|(i, t)| (i, t.clone())) else {
+        app.transcript_clip = None;
         placeholder(app, ui, rect);
         return;
     };
+    // What `A` will act on. Recorded rather than re-derived, so the key and
+    // the document cannot disagree about which clip is on screen.
+    app.transcript_clip = Some(clip_id);
     if transcript.is_empty() {
         message(&painter, rect, "Nothing was said in this clip.");
         return;

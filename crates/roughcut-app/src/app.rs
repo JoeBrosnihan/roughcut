@@ -340,6 +340,11 @@ pub struct RoughcutApp {
     pub transcribing: HashSet<ClipId>,
     /// The monitor shows the transcript instead of the picture.
     pub show_transcript: bool,
+    /// The clip whose transcript is on screen, recorded by the panel as it
+    /// draws. `A` acts on this rather than working the clip out again from
+    /// focus: the panel and the key must agree about which clip is being
+    /// looked at, and deriving it twice is how they came to disagree.
+    pub transcript_clip: Option<ClipId>,
     /// Words selected in the document, as indices into the flattened
     /// transcript, and whether a drag is still in progress.
     pub text_selection: Option<Selection>,
@@ -449,6 +454,7 @@ impl RoughcutApp {
             transcript_requested: HashSet::new(),
             transcribing: HashSet::new(),
             show_transcript: false,
+            transcript_clip: None,
             text_selection: None,
             selecting_text: false,
             sheet_clock: 0,
@@ -946,7 +952,7 @@ impl RoughcutApp {
                 // In the document, `A` appends what is selected. It is the
                 // same verb: the selection has already set the marks, so this
                 // only has to make sure they are the current ones.
-                if self.show_transcript && self.text_selection.is_some() {
+                if self.show_transcript {
                     self.append_selected_text();
                 } else {
                     self.append_marked();
@@ -1820,7 +1826,12 @@ impl RoughcutApp {
             );
             return;
         }
-        self.set_status(format!("rotating {}…", clip.file_name()), StatusKind::Info);
+        let name = clip.file_name();
+        // Put the file down first. mpv keeps an open handle on whatever it is
+        // showing, and that alone is enough to stop the rewritten copy being
+        // moved into place.
+        self.monitor.release(&path);
+        self.set_status(format!("rotating {name}…"), StatusKind::Info);
         self.workers.submit(Job::Rotate {
             clip_id: id,
             path,
@@ -2733,6 +2744,12 @@ impl RoughcutApp {
         if self.sheets.contains_key(&id) {
             return;
         }
+        // Already queued behind every other visible tile. Somebody asking
+        // again means they are pointing at this one now.
+        if self.sheet_requested.contains(&id) {
+            self.workers.prioritise_sheet(id);
+            return;
+        }
         // Every tile of a photograph would be the same picture. The poster
         // already is that picture.
         if self.project.clip(id).is_some_and(|c| c.still) {
@@ -2869,7 +2886,13 @@ impl RoughcutApp {
             return false;
         };
         let fps = self.fps();
-        let Some((id, transcript)) = self.current_transcript() else {
+        // The clip the document is showing, which is not necessarily the one
+        // `focus` points at — pressing Tab, or clicking the timeline, used to
+        // be enough to make this key act on nothing at all.
+        let Some(id) = self.transcript_clip else {
+            return false;
+        };
+        let Some(transcript) = self.transcripts.get(&id) else {
             return false;
         };
         let Some(last) = self.project.clip(id).map(|c| c.last_frame()) else {
@@ -2893,11 +2916,21 @@ impl RoughcutApp {
 
     /// Select a sentence and append it, which is the whole gesture in one key.
     pub fn append_selected_text(&mut self) {
-        if !self.mark_from_selection() {
-            self.set_status("select some words first", StatusKind::Warn);
+        if self.mark_from_selection() {
+            self.append_marked();
             return;
         }
-        self.append_marked();
+        // Nothing selected is the ordinary case, not an error: `A` in the
+        // document should still append the clip being read, exactly as it
+        // would with the picture on screen.
+        match self.transcript_clip {
+            Some(id) => {
+                self.selected_clip = Some(id);
+                self.focus = Focus::Source;
+                self.append_clip(id);
+            }
+            None => self.set_status("no transcript on screen", StatusKind::Warn),
+        }
     }
 
     fn request_missing_thumbnails(&mut self) {
