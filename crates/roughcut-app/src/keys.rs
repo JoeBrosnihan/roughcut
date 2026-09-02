@@ -30,6 +30,20 @@ pub fn actions_this_frame(ctx: &egui::Context) -> Vec<Action> {
                     modifiers,
                     ..
                 } => map_key(*key, *modifiers),
+                // The clipboard shortcuts never arrive as key presses.
+                //
+                // egui-winit turns Ctrl+C, Ctrl+X and Ctrl+V into these three
+                // events and returns *without* emitting the key event at all,
+                // so reading only `Event::Key` means the three of them do
+                // nothing whatsoever. `map_key` maps them perfectly well and
+                // is simply never asked.
+                //
+                // The pasted text is ignored: what Roughcut pastes is a range
+                // of a file, which means nothing to any other program and
+                // cannot be expressed as text.
+                Event::Copy => Some(Action::Copy),
+                Event::Cut => Some(Action::Cut),
+                Event::Paste(_) => Some(Action::Paste),
                 _ => None,
             })
             .collect()
@@ -122,6 +136,47 @@ fn map_key(key: Key, m: Modifiers) -> Option<Action> {
 
 #[cfg(test)]
 mod tests {
+    /// Drive the real event path rather than `map_key`.
+    ///
+    /// This is the test that was missing. `map_key(Key::C, ctrl())` passes and
+    /// always did; it proves the table is right and says nothing about whether
+    /// anything ever calls it with those arguments. Nothing did.
+    fn actions_for(events: Vec<egui::Event>) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        ctx.begin_pass(input);
+        let actions = actions_this_frame(&ctx);
+        let _ = ctx.end_pass();
+        actions
+    }
+
+    #[test]
+    fn the_clipboard_shortcuts_arrive_as_clipboard_events() {
+        assert_eq!(actions_for(vec![egui::Event::Copy]), vec![Action::Copy]);
+        assert_eq!(actions_for(vec![egui::Event::Cut]), vec![Action::Cut]);
+        assert_eq!(
+            actions_for(vec![egui::Event::Paste(String::from("anything"))]),
+            vec![Action::Paste]
+        );
+    }
+
+    #[test]
+    fn ordinary_keys_still_come_through_as_keys() {
+        assert_eq!(
+            actions_for(vec![egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }]),
+            vec![Action::Append]
+        );
+    }
+
     use super::*;
 
     fn plain() -> Modifiers {

@@ -288,6 +288,12 @@ pub struct RoughcutApp {
     /// clipboard: what is being copied is a reference to part of a file, which
     /// means nothing outside this application.
     clipboard: Option<TimelineItem>,
+    /// Text to hand the system clipboard on the next pass.
+    ///
+    /// Not for anyone else's benefit: egui only reports Ctrl+V when the system
+    /// clipboard has something in it, so copying inside Roughcut has to leave
+    /// *something* there or the paste that follows is never delivered.
+    pending_clipboard_text: Option<String>,
     /// The export dialog's pending choices, while it is open.
     pub export_plan: Option<ExportPlan>,
     /// A render in flight. One at a time: it is a foreground operation with a
@@ -439,6 +445,7 @@ impl RoughcutApp {
             trim_drag: None,
             force_media_jump: false,
             clipboard: None,
+            pending_clipboard_text: None,
             export_plan: None,
             render: None,
             edl: None,
@@ -1191,6 +1198,11 @@ impl RoughcutApp {
             .map(|c| c.file_name())
             .unwrap_or_default();
         let len = format_timecode(item.len(), self.project.fps());
+        // Leave a trace on the system clipboard. Roughcut pastes a range of a
+        // file, which no other program can use, but Ctrl+V is only reported to
+        // us at all when the clipboard is non-empty — so without this the
+        // paste after a copy is silently never delivered.
+        self.pending_clipboard_text = Some(format!("{name} {len}"));
         if lift && self.focus == Focus::Timeline {
             self.ripple_delete();
             self.set_status(format!("cut {len} of {name}"), StatusKind::Info);
@@ -3007,6 +3019,10 @@ impl eframe::App for RoughcutApp {
             for action in keys::actions_this_frame(ctx) {
                 self.dispatch(action);
             }
+        }
+
+        if let Some(text) = self.pending_clipboard_text.take() {
+            ctx.copy_text(text);
         }
 
         ui::status::show(self, ctx);
