@@ -12,6 +12,48 @@ use std::os::windows::process::CommandExt;
 /// `CREATE_NO_WINDOW` — keeps a console from flashing on every ffprobe call.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// `BELOW_NORMAL_PRIORITY_CLASS`, so background transcoding yields to whatever
+/// the user is doing rather than competing with it.
+#[cfg(windows)]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+/// How many threads one background ffmpeg may use.
+///
+/// ffmpeg helps itself to one thread per core unless told otherwise, and the
+/// worker pool runs up to four at once. On a sixteen-core machine that is
+/// sixty-four threads of transcoding against sixteen cores, which is what made
+/// the whole machine stutter while a bin was being prepared. Bounding it so
+/// that pool x threads lands near half the machine leaves the other half for
+/// the thing the user is actually looking at.
+pub fn background_threads() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    // Mirrors the pool size in the app: min(cpus / 2, 4).
+    let pool = (cpus / 2).clamp(1, 4);
+    ((cpus / 2) / pool).clamp(1, 4)
+}
+
+/// A `Command` for speculative work: thumbnails, proxies, waveforms,
+/// transcription — anything the user did not ask for and is not waiting on.
+///
+/// Lowered to below-normal priority, which the worker threads' own priority
+/// does **not** do for them. `SetThreadPriority` applies to the calling thread
+/// and nothing else; a child process starts at normal priority whatever the
+/// thread that spawned it was set to. So all the careful thread-priority work
+/// in the pool had no effect on the actual load, because the actual load is
+/// entirely in these child processes.
+///
+/// Foreground work — rendering an export, rotating a clip, probing a file
+/// during import — deliberately does not use this. The user is waiting on
+/// those.
+pub fn background_command(program: impl AsRef<Path>) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = quiet_command(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    cmd
+}
 
 /// Build a `Command` that never pops a console window on Windows.
 pub fn quiet_command(program: impl AsRef<Path>) -> Command {
@@ -240,5 +282,27 @@ mod tests {
         assert!(is_media_file(Path::new("/a/b.mov")));
         assert!(!is_media_file(Path::new("/a/b.txt")));
         assert!(!is_media_file(Path::new("/a/b")));
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+
+    /// The pool runs several of these at once, so the point is the product:
+    /// workers x threads must not exceed the machine.
+    #[test]
+    fn background_ffmpeg_never_claims_the_whole_machine() {
+        let n = background_threads();
+        assert!((1..=4).contains(&n), "{n} threads is not a sane bound");
+
+        let cpus = std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(4);
+        let pool = (cpus / 2).clamp(1, 4);
+        assert!(
+            pool * n <= cpus,
+            "{pool} workers x {n} threads oversubscribes {cpus} cores"
+        );
     }
 }

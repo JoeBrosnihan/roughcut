@@ -90,6 +90,9 @@ pub struct Monitor {
     /// The audio tracks, flattened to one file, played underneath whatever is
     /// on screen. `None` when there are no audio tracks.
     bed: Option<PathBuf>,
+    /// Whether mpv currently has a bed attached, so it is only detached once
+    /// rather than on every load for the rest of the session.
+    bed_attached: bool,
     /// Repaint hook handed to mpv's wakeup and render-update callbacks.
     repaint: Arc<dyn Fn() + Send + Sync>,
 }
@@ -111,6 +114,7 @@ impl Monitor {
             pending: None,
             corrected_for: None,
             bed: None,
+            bed_attached: false,
             seek_latencies_ms: Vec::new(),
             fps: Rational::new(30000, 1001),
             volume: 80.0,
@@ -375,15 +379,20 @@ impl Monitor {
         let needs_load = self.loaded.as_deref() != Some(path);
         if needs_load {
             // Attached before the load, because that is the only time mpv
-            // will take it.
-            let _ = player.set_property_string(
-                "audio-files",
-                &self
-                    .bed
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            );
+            // will take it. Only when there is one, or when one has just been
+            // taken away: every property set is a synchronous call into mpv,
+            // and this runs on the thread drawing the interface.
+            if self.bed.is_some() || self.bed_attached {
+                let _ = player.set_property_string(
+                    "audio-files",
+                    &self
+                        .bed
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                );
+                self.bed_attached = self.bed.is_some();
+            }
             if let Err(e) = player.load_file(path) {
                 log::warn!("cannot open {}: {e}", path.display());
                 return;

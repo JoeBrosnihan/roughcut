@@ -13,7 +13,7 @@ use roughcut_core::probe::{probe, MediaInfo};
 use roughcut_core::proxy;
 use roughcut_core::rotate::{self, Turn};
 use roughcut_core::time::{frame_to_seconds, Rational};
-use roughcut_core::tools::{quiet_command, Tools};
+use roughcut_core::tools::{background_command, background_threads, quiet_command, Tools};
 use roughcut_core::audio::{self, MixPiece};
 use roughcut_core::transcript::{self, Transcript};
 use roughcut_core::waveform;
@@ -875,8 +875,8 @@ fn grab_strip(
         return grab_frame(ffmpeg, path, frames[0], fps);
     }
     let n = frames.len();
-    let mut cmd = quiet_command(ffmpeg);
-    cmd.args(["-v", "error"]);
+    let mut cmd = background_command(ffmpeg);
+    cmd.args(["-v", "error", "-threads", &background_threads().to_string()]);
     for &frame in frames {
         // Input seek (`-ss` before `-i`) is orders of magnitude faster than
         // output seek and is accurate enough for a bin thumbnail.
@@ -929,8 +929,9 @@ fn grab_frame(
     // Input seek (`-ss` before `-i`) is orders of magnitude faster than output
     // seek and is accurate enough for a bin thumbnail.
     let seconds = frame_to_seconds(frame, fps);
-    let output = quiet_command(ffmpeg)
-        .args(["-v", "error", "-ss", &format!("{seconds:.6}")])
+    let output = background_command(ffmpeg)
+        .args(["-v", "error", "-threads", &background_threads().to_string()])
+        .args(["-ss", &format!("{seconds:.6}")])
         .arg("-i")
         .arg(path)
         .args([
@@ -1245,6 +1246,56 @@ mod tests {
         // A clip with nothing queued is not an error - it is already done, or
         // already running, and either way there is nothing to hurry.
         assert!(!pool.prioritise_transcript(ClipId::new()));
+    }
+
+    /// Background work must actually be deprioritised at the operating system,
+    /// not merely in intent.
+    ///
+    /// This is worth a test because the obvious mechanism does not work.
+    /// `SetThreadPriority` on the worker thread — which this pool does — has
+    /// no effect whatsoever on a process that thread spawns: a child starts at
+    /// normal priority regardless. Since every expensive thing here happens in
+    /// a child process, that meant none of the load was ever deprioritised,
+    /// and four ffmpegs would fight the interface for the machine.
+    #[cfg(windows)]
+    #[test]
+    fn background_children_really_run_below_normal() {
+        let Some(ffmpeg) = Tools::discover().ffmpeg else {
+            eprintln!("SKIPPED: ffmpeg is required");
+            return;
+        };
+        use std::os::windows::io::AsRawHandle;
+
+        let spawn = |mut cmd: std::process::Command| {
+            cmd.args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=d=30"])
+                .args(["-f", "null", "-"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("cannot run ffmpeg")
+        };
+
+        let mut background = spawn(background_command(&ffmpeg));
+        let mut foreground = spawn(quiet_command(&ffmpeg));
+
+        // SAFETY: both handles are live; the children are killed below.
+        let (bg, fg) = unsafe {
+            (
+                windows_sys::Win32::System::Threading::GetPriorityClass(
+                    background.as_raw_handle() as _,
+                ),
+                windows_sys::Win32::System::Threading::GetPriorityClass(
+                    foreground.as_raw_handle() as _,
+                ),
+            )
+        };
+        let _ = background.kill();
+        let _ = foreground.kill();
+
+        const BELOW_NORMAL: u32 = 0x0000_4000;
+        const NORMAL: u32 = 0x0000_0020;
+        assert_eq!(bg, BELOW_NORMAL, "background work is not deprioritised");
+        assert_eq!(fg, NORMAL, "foreground work should not be slowed down");
     }
 
     #[test]

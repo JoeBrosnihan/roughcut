@@ -53,6 +53,10 @@ pub fn ffmpeg_args(path: &Path) -> Vec<std::ffi::OsString> {
     vec![
         "-v".into(),
         "error".into(),
+        // Speculative work on every clip in the bin: politeness matters more
+        // than finishing a fraction of a second sooner.
+        "-threads".into(),
+        crate::tools::background_threads().to_string().into(),
         "-i".into(),
         path.as_os_str().to_os_string(),
         // Video decoding is by far the expensive half of this file, and none
@@ -116,7 +120,7 @@ pub fn peaks<R: Read>(reader: R, buckets: usize) -> Result<Vec<u8>> {
 
 /// Run ffmpeg over `path` and reduce what comes back.
 pub fn extract(ffmpeg: &Path, path: &Path, buckets: usize) -> Result<Vec<u8>> {
-    let mut child = crate::tools::quiet_command(ffmpeg)
+    let mut child = crate::tools::background_command(ffmpeg)
         .args(ffmpeg_args(path))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

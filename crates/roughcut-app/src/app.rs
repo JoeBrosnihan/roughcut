@@ -29,6 +29,49 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Phase timings for one pass, reported only when the pass was slow enough to
+/// be felt. A frame is 33 ms; anything past 80 ms reads as a stutter.
+struct Timings {
+    started: std::time::Instant,
+    last: std::time::Instant,
+    phases: Vec<(&'static str, f64)>,
+}
+
+impl Default for Timings {
+    fn default() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            last: now,
+            phases: Vec::new(),
+        }
+    }
+}
+
+impl Timings {
+    fn mark(&mut self, name: &'static str) {
+        let now = std::time::Instant::now();
+        self.phases
+            .push((name, now.duration_since(self.last).as_secs_f64() * 1000.0));
+        self.last = now;
+    }
+
+    fn report(&self) {
+        let total = self.started.elapsed().as_secs_f64() * 1000.0;
+        if total < 80.0 {
+            return;
+        }
+        let worst: String = self
+            .phases
+            .iter()
+            .filter(|(_, ms)| *ms >= 1.0)
+            .map(|(n, ms)| format!("{n} {ms:.0}ms"))
+            .collect::<Vec<_>>()
+            .join("  ");
+        log::warn!("slow pass: {total:.0}ms  [{worst}]");
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Source,
@@ -2899,14 +2942,26 @@ impl eframe::App for RoughcutApp {
         let focused = ctx.input(|i| i.focused);
         self.workers.set_suspended(!focused);
 
+        // Where a slow pass went. The application is meant to be invisible
+        // between keypresses, so a pass long enough to feel is a defect, and
+        // one that only shows up on real media is a defect that has to be
+        // measured rather than reasoned about. Costs one `Instant::now` per
+        // phase and prints nothing unless something was actually slow.
+        let mut timings = Timings::default();
         self.handle_dropped_files(ctx);
+        timings.mark("dropped");
         self.drain_workers(ctx);
+        timings.mark("drain_workers");
         self.drain_render();
         self.sync_edl();
+        timings.mark("sync_edl");
         self.monitor.pump_events();
+        timings.mark("mpv_events");
         self.advance_playback();
         self.request_missing_thumbnails();
+        timings.mark("thumbnails");
         self.request_missing_transcripts();
+        timings.mark("transcripts");
         // The clip in the monitor jumps the transcription queue. Cheap enough
         // to do every pass, and passes only happen on input.
         if let Some(id) = self.selected_clip {
@@ -2923,8 +2978,11 @@ impl eframe::App for RoughcutApp {
 
         ui::status::show(self, ctx);
         ui::timeline::show(self, ctx);
+        timings.mark("ui_timeline");
         ui::bin::show(self, ctx);
+        timings.mark("ui_bin");
         ui::monitor_panel::show(self, ctx);
+        timings.mark("ui_monitor");
         ui::help::show(self, ctx);
         ui::dialogs::show(self, ctx);
 
@@ -2953,8 +3011,10 @@ impl eframe::App for RoughcutApp {
             }
             None => self.monitor.clear(),
         }
+        timings.mark("media_sync");
 
         self.apply_fullscreen(ctx);
+        timings.report();
 
         // One write per pass at most, and only when something actually
         // changed. Passes happen on input, so this costs nothing at idle.

@@ -9,7 +9,7 @@
 //! family holiday is not something to post to a third party in order to find
 //! out where the laughing is.
 
-use crate::tools::quiet_command;
+use crate::tools::{background_command, background_threads};
 use crate::transcript::{Segment, Transcript, Word as TWord};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -24,6 +24,8 @@ pub fn wav_args(source: &Path, dest: &Path) -> Vec<std::ffi::OsString> {
         "-y".into(),
         "-v".into(),
         "error".into(),
+        "-threads".into(),
+        background_threads().to_string().into(),
         "-i".into(),
         source.as_os_str().to_os_string(),
         // The picture is the expensive half of the file and none of it is
@@ -68,7 +70,7 @@ pub fn find_model(whisper: &Path) -> Option<PathBuf> {
 
 /// Extract `source`'s audio to `dest` as 16 kHz mono WAV.
 pub fn extract_audio(ffmpeg: &Path, source: &Path, dest: &Path) -> Result<()> {
-    let output = quiet_command(ffmpeg)
+    let output = background_command(ffmpeg)
         .args(wav_args(source, dest))
         .output()
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
@@ -144,7 +146,7 @@ pub fn transcribe(
 
     extract_audio(ffmpeg, source, &wav)?;
 
-    let output = quiet_command(whisper)
+    let output = background_command(whisper)
         .args(whisper_args(model, &wav, &prefix))
         // whisper.cpp finds its CUDA and ggml DLLs beside the executable.
         .current_dir(whisper.parent().unwrap_or(Path::new(".")))

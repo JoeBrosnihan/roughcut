@@ -9,7 +9,7 @@
 use crate::model::{ClipId, SourceClip};
 use crate::probe::{probe, MediaInfo};
 use crate::time::Rational;
-use crate::tools::quiet_command;
+use crate::tools::{background_command, background_threads};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -30,6 +30,10 @@ pub fn proxy_args(source: &Path, dest: &Path) -> Vec<std::ffi::OsString> {
         "-y".into(),
         "-v".into(),
         "error".into(),
+        // A proxy is minutes of transcoding for a clip nobody asked about
+        // yet. Unbounded, four of these together bury the machine.
+        "-threads".into(),
+        background_threads().to_string().into(),
         "-i".into(),
         source.as_os_str().to_os_string(),
         "-vf".into(),
@@ -128,7 +132,7 @@ pub fn generate(
         }
     }
 
-    let output = quiet_command(ffmpeg)
+    let output = background_command(ffmpeg)
         .args(proxy_args(&clip.path, &dest))
         .output()
         .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
