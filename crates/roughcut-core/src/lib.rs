@@ -19,6 +19,7 @@ pub mod audio;
 pub mod import;
 pub mod mlt;
 pub mod model;
+pub mod paths;
 pub mod edl;
 pub mod probe;
 pub mod profile;

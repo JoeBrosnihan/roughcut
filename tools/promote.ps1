@@ -51,7 +51,9 @@ $repo = Split-Path -Parent $PSScriptRoot
 
 # A running dev build holds target\release\roughcut.exe open, and the linker
 # then fails with an error that says nothing about why. Say it plainly instead.
-$running = @(Get-Process roughcut -ErrorAction SilentlyContinue |
+# roughcut-cli counts too: an MCP server is long-lived, and holds its own
+# binary open for as long as the client that started it is running.
+$running = @(Get-Process roughcut, roughcut-cli -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($repo, 'OrdinalIgnoreCase') })
 if ($running) {
     Write-Host "A dev build is running and holds the binary open:" -ForegroundColor Yellow
@@ -64,7 +66,7 @@ if ($running) {
 
 # The production copy cannot be replaced while it is running, and it is the
 # one actually being used for editing. Say so before spending a build on it.
-$inUse = @(Get-Process roughcut -ErrorAction SilentlyContinue |
+$inUse = @(Get-Process roughcut, roughcut-cli -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($Dest, 'OrdinalIgnoreCase') })
 if ($inUse) {
     Write-Host "Production is running:" -ForegroundColor Yellow
@@ -96,6 +98,12 @@ try {
 $exe = Join-Path $repo 'target\release\roughcut.exe'
 if (-not (Test-Path $exe)) { throw "not found: $exe" }
 
+# The headless front door travels with the window. It has to be the same build:
+# the two share a project format and a cache layout, and a stale one of either
+# would be reading the other's files while disagreeing about what is in them.
+$cli = Join-Path $repo 'target\release\roughcut-cli.exe'
+if (-not (Test-Path $cli)) { throw "not found: $cli" }
+
 # libmpv must travel with the binary or the monitor will not work.
 $mpv = Get-ChildItem (Join-Path $repo 'vendor\mpv') -Filter 'libmpv-2.dll' -ErrorAction SilentlyContinue |
     Select-Object -First 1
@@ -113,6 +121,14 @@ if (Test-Path (Join-Path $Dest 'roughcut.exe')) {
     Remove-Item (Join-Path $Dest 'roughcut.exe') -Force
 }
 Move-Item $staged (Join-Path $Dest 'roughcut.exe')
+
+$staged = Join-Path $Dest 'roughcut-cli.exe.new'
+Copy-Item $cli $staged -Force
+if (Test-Path (Join-Path $Dest 'roughcut-cli.exe')) {
+    Remove-Item (Join-Path $Dest 'roughcut-cli.exe') -Force
+}
+Move-Item $staged (Join-Path $Dest 'roughcut-cli.exe')
+
 Copy-Item $mpv.FullName (Join-Path $Dest 'libmpv-2.dll') -Force
 
 # Record what this build was, so you can tell it from a later one and get back
@@ -157,6 +173,7 @@ if (-not $NoShortcut) {
 Write-Host ""
 Write-Host "Installed Roughcut $version" -ForegroundColor Green
 Write-Host "  Location : $Dest"
+Write-Host "  Headless : roughcut-cli.exe, beside it - see docs\automation.md"
 Write-Host "  Settings : $env:APPDATA\Roughcut  (dev builds use target\dev-config)"
 Write-Host ""
 Write-Host "The installed copy is now independent of the source tree."

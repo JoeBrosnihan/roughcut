@@ -177,7 +177,7 @@ impl Transcript {
 const PAD_BEFORE_MS: i64 = 250;
 const PAD_AFTER_MS: i64 = 400;
 
-fn ms_to_frame(ms: i64, fps: Rational) -> i64 {
+pub fn ms_to_frame(ms: i64, fps: Rational) -> i64 {
     if fps.den == 0 {
         return 0;
     }

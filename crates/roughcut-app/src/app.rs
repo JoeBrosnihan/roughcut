@@ -234,6 +234,18 @@ pub struct RoughcutApp {
     pub project: Project,
     pub history: History,
     pub project_path: Option<PathBuf>,
+    /// When the project file was last written, as far as this window knows.
+    ///
+    /// Roughcut is no longer the only thing that edits a project: `roughcut-cli`
+    /// and the MCP server write the same file. Remembering the timestamp of
+    /// our own last read or write is what tells an edit made elsewhere apart
+    /// from one made here.
+    project_written: Option<std::time::SystemTime>,
+    /// Whether the window had focus on the previous pass, so a change on disk
+    /// can be looked for exactly once, when focus comes back. Checking every
+    /// pass would be a file system call in the idle loop; a timer would wake
+    /// the loop while nothing is happening. Neither is allowed (§3).
+    was_focused: bool,
     pub dirty: bool,
 
     pub settings: Settings,
@@ -417,6 +429,8 @@ impl RoughcutApp {
             project: Project::new(),
             history: History::new(),
             project_path: None,
+            project_written: None,
+            was_focused: true,
             dirty: false,
             settings,
             tools,
@@ -2068,6 +2082,42 @@ impl RoughcutApp {
         self.settings.save();
     }
 
+    /// Notice that something else has written the project, and act on it.
+    fn check_for_an_edit_elsewhere(&mut self) {
+        let Some(path) = self.project_path.clone() else { return };
+        let now = written_at(&path);
+        match edit_elsewhere(self.project_written, now, self.dirty) {
+            Elsewhere::Nothing => {}
+            Elsewhere::Gone => {
+                self.project_written = None;
+                self.set_status(
+                    format!("{} is no longer there", path.display()),
+                    StatusKind::Warn,
+                );
+            }
+            Elsewhere::KeepMine => {
+                self.project_written = now;
+                self.set_status(
+                    "the project changed on disk, and you have unsaved edits — save as, or reopen",
+                    StatusKind::Warn,
+                );
+            }
+            Elsewhere::Reload => {
+                // Keep looking at whatever was being looked at, when it
+                // survived the edit.
+                let watching = self.selected_clip;
+                let frame = self.source_frame;
+                self.open_project_at(&path);
+                if let Some(id) = watching.filter(|id| self.project.clip(*id).is_some()) {
+                    self.selected_clip = Some(id);
+                    let last = self.project.clip(id).map(|c| c.last_frame()).unwrap_or(0);
+                    self.source_frame = frame.min(last);
+                }
+                self.set_status("reloaded — the project changed on disk", StatusKind::Info);
+            }
+        }
+    }
+
     fn open_project_at(&mut self, path: &Path) {
         let path = path.to_path_buf();
         match project_io::load(&path) {
@@ -2080,6 +2130,7 @@ impl RoughcutApp {
                 self.project = project;
                 self.history.clear();
                 self.project_path = Some(path.clone());
+                self.project_written = written_at(&path);
                 self.dirty = false;
                 self.posters.clear();
                 self.sheets.clear();
@@ -2141,6 +2192,7 @@ impl RoughcutApp {
                 self.settings.remember_recent(&path);
                 self.settings.save();
                 self.project_path = Some(path.clone());
+                self.project_written = written_at(&path);
                 self.dirty = false;
                 // The work is in a real file now, so the snapshot no longer
                 // needs to prompt — but it is kept.
@@ -2972,6 +3024,52 @@ impl RoughcutApp {
     }
 }
 
+/// What to do about the project file having moved underneath the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Elsewhere {
+    /// Nobody else has touched it.
+    Nothing,
+    /// It has been deleted or made unreadable.
+    Gone,
+    /// Somebody else wrote it, and this window has edits of its own.
+    KeepMine,
+    /// Somebody else wrote it, and this window has nothing to lose.
+    Reload,
+}
+
+/// Decide, given what the window last knew and what is on disk now.
+///
+/// Reloading without asking is only right because of the condition on it:
+/// nothing here is unsaved. A window with no edits of its own is a view of a
+/// file, and a view showing the wrong thing is worse than one that moves.
+/// With unsaved work it says so and touches nothing — there is no merge to do
+/// and no way to guess which side is wanted.
+fn edit_elsewhere(
+    known: Option<std::time::SystemTime>,
+    now: Option<std::time::SystemTime>,
+    dirty: bool,
+) -> Elsewhere {
+    match (known, now) {
+        (_, None) if known.is_some() => Elsewhere::Gone,
+        (_, None) => Elsewhere::Nothing,
+        (k, n) if k == n => Elsewhere::Nothing,
+        // A project that was never on disk cannot have been edited elsewhere;
+        // this is a file appearing where one was expected, which is somebody
+        // else's save and worth taking only if nothing here would be lost.
+        _ if dirty => Elsewhere::KeepMine,
+        _ => Elsewhere::Reload,
+    }
+}
+
+/// When a file was last written, or `None` if it cannot be read at all.
+///
+/// Modification time rather than a hash of the contents: the question is only
+/// "has somebody else saved this", and answering it must not cost a read of a
+/// project that could be megabytes.
+fn written_at(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 impl eframe::App for RoughcutApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Roughcut owns the keyboard. egui's Tab-navigation would otherwise
@@ -2986,6 +3084,12 @@ impl eframe::App for RoughcutApp {
         // Background work stops while the window is not focused (§3).
         let focused = ctx.input(|i| i.focused);
         self.workers.set_suspended(!focused);
+        // Coming back to the window is the one moment worth asking whether
+        // something else has edited the project — you have just been away.
+        if focused && !self.was_focused {
+            self.check_for_an_edit_elsewhere();
+        }
+        self.was_focused = focused;
 
         // Where a slow pass went. The application is meant to be invisible
         // between keypresses, so a pass long enough to feel is a defect, and
@@ -3134,5 +3238,40 @@ fn reveal(path: &Path) -> std::io::Result<()> {
             .arg(path.parent().unwrap_or(path))
             .spawn()
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn t(secs: u64) -> Option<SystemTime> {
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    /// Two programs now write the same file. Getting this wrong in one
+    /// direction shows a stale cut; in the other it throws away work.
+    #[test]
+    fn an_edit_made_elsewhere_is_followed_only_when_nothing_would_be_lost() {
+        // Untouched.
+        assert_eq!(edit_elsewhere(t(10), t(10), false), Elsewhere::Nothing);
+        assert_eq!(edit_elsewhere(t(10), t(10), true), Elsewhere::Nothing);
+
+        // Somebody else saved it.
+        assert_eq!(edit_elsewhere(t(10), t(20), false), Elsewhere::Reload);
+        assert_eq!(
+            edit_elsewhere(t(10), t(20), true),
+            Elsewhere::KeepMine,
+            "unsaved work is never silently replaced"
+        );
+
+        // It went away.
+        assert_eq!(edit_elsewhere(t(10), None, false), Elsewhere::Gone);
+        assert_eq!(edit_elsewhere(t(10), None, true), Elsewhere::Gone);
+
+        // A project that has never been saved has nothing to compare against,
+        // and must not be reported as changed on every return to the window.
+        assert_eq!(edit_elsewhere(None, None, true), Elsewhere::Nothing);
     }
 }

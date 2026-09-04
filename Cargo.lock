@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "roughcut-app"
-version = "0.19.2"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2106,8 +2106,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "roughcut-cli"
+version = "0.20.0"
+dependencies = [
+ "anyhow",
+ "roughcut-core",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "roughcut-core"
-version = "0.19.2"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "log",
@@ -2120,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "roughcut-mpv"
-version = "0.19.2"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "libloading 0.9.0",

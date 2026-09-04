@@ -9,6 +9,7 @@ are for people building or changing it.
 | [timing.md](timing.md) | The frame-exact timing model, and the bug measurement caught |
 | [mlt.md](mlt.md) | The MLT export: how the schema was derived, what is emitted |
 | [design.md](design.md) | Design pillars, crate layout, video integration, autosave |
+| [automation.md](automation.md) | `roughcut-cli`: the command surface and the MCP server |
 | [verification.md](verification.md) | Measured performance, the test suite, known gaps |
 | [deviations.md](deviations.md) | Every departure from the original brief, and why |
 | [licensing.md](licensing.md) | Why GPLv3, and what it means for releases |
@@ -165,6 +166,7 @@ which binary and which config directory it is using.
 | --- | --- |
 | `ROUGHCUT_MPV` | Full path to libmpv, overriding discovery |
 | `ROUGHCUT_CONFIG_DIR` | Where settings and the autosave snapshot live |
+| `ROUGHCUT_PROJECT` | The project `roughcut-cli` works on when `--project` is not given |
 | `ROUGHCUT_LOG_FILE` | Write the log here — the only way to see it from a release build, which has no console |
 | `RUST_LOG` | Log filter. The bin target is `roughcut`, so use `roughcut=debug` |
 | `ROUGHCUT_REGEN_KEYS` | Rewrite `KEYS.md` from the key table when running its test |

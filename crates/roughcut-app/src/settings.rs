@@ -90,80 +90,15 @@ fn recent_key(path: &Path) -> String {
     }
 }
 
-/// Where settings and the recovery snapshot live.
+/// Where settings, the recovery snapshot and the derived caches live.
 ///
-/// A dev build must never touch the settings or — far worse — the recovery
-/// snapshot of the promoted copy someone is actually editing in. Three layers,
-/// most specific first:
-///
-/// 1. `ROUGHCUT_CONFIG_DIR`, if set.
-/// 2. **Where the binary is.** An executable sitting in `target/debug` or
-///    `target/release` is by definition a dev build, however it was launched.
-///    Relying on `.cargo/config.toml` alone was not enough: it only applies to
-///    `cargo run`, so launching `target\release\roughcut.exe` directly — which
-///    is exactly what a test script does — silently shared production's state.
-/// 3. The platform's config directory, for a promoted binary living anywhere
-///    else.
-pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("ROUGHCUT_CONFIG_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    if let Some(dev) = dev_config_dir() {
-        return Some(dev);
-    }
-    let base = if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    } else if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-    }?;
-    Some(base.join("Roughcut"))
-}
-
-/// `<target>/dev-config` when this executable is running from a cargo build
-/// directory, otherwise `None`.
-fn dev_config_dir() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let parent = exe.parent()?;
-    let profile = parent.file_name()?.to_str()?;
-    if profile != "debug" && profile != "release" {
-        return None;
-    }
-    let target = parent.parent()?;
-    if target.file_name()?.to_str()? != "target" {
-        return None;
-    }
-    Some(target.join("dev-config"))
-}
-
-/// The single recovery snapshot. Beside `settings.json`, so it exists even for
-/// a project that has never been saved anywhere.
-/// Where bin filmstrips are kept between sessions.
-///
-/// Under the config directory, so a development build cannot serve or poison
-/// the cache of the copy you actually edit with — the same isolation the
-/// settings and the recovery snapshot get.
-pub fn thumb_cache_dir() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("thumbnails"))
-}
-
-/// Where audio envelopes are kept between sessions, for the same reason.
-pub fn waveform_cache_dir() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("waveforms"))
-}
-
-/// Where transcripts are kept. The most valuable cache of the three: a
-/// transcript costs tens of seconds to produce and tens of kilobytes to keep.
-pub fn transcript_cache_dir() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("transcripts"))
-}
-
-pub fn autosave_path() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("autosave.roughcut"))
-}
+/// Defined once in `roughcut_core::paths` and re-exported here, because the
+/// command line front door has to find exactly the same files this window
+/// does. A second definition of "where" is a second definition that can drift,
+/// and the one that would drift silently is the transcript cache.
+pub use roughcut_core::paths::{
+    autosave_path, config_dir, thumb_cache_dir, transcript_cache_dir, waveform_cache_dir,
+};
 
 fn config_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("settings.json"))

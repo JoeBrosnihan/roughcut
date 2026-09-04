@@ -1,6 +1,6 @@
 # Verification
 
-`cargo test --workspace` — 159 tests, no warnings, clippy clean on Windows and
+`cargo test --workspace` — 299 tests, no warnings, clippy clean on Windows and
 type-checking clean on both macOS targets.
 
 ## Frame accuracy
@@ -23,6 +23,27 @@ apart, so the pass cannot be vacuous. With Shotcut installed the test reports:
 ```
 VERIFIED with melt: all 100 rendered frames match source frames 100..=199 exactly.
 ```
+
+## The command surface
+
+`roughcut-cli` reaches the same model from a shell and from an MCP client, so
+what is checked is that the two doors cannot drift apart and that an edit made
+through either actually lands on disk.
+
+`crates/roughcut-cli/tests/editing.rs` makes the same append through the
+command line parser and through `tools/call`, and asserts the resulting
+projects are identical. It also asserts the table's `writes` column against
+reality: every read-only command is run and the file's bytes compared, because
+a command that edits the project in memory and is never saved passes every unit
+test and does nothing at all. A `batch` that fails on its third step is checked
+to leave the project byte for byte as it was.
+
+`tests/words.rs` runs the transcript path — `search`, `cut-words` — against the
+whisper output recorded in `crates/roughcut-core/tests/fixtures_whisper.json`,
+including that the padding on a cut contains the speech rather than clipping
+it. Measured outside the suite on real footage: cutting words 1–2 of
+`IMG_3803.MOV`, rendering only that through melt, and transcribing the render
+returns the sentence intact, and the MP4 is exactly the 51 frames asked for.
 
 `proxy_timing.rs` covers the rule that a proxy must match its source frame for
 frame, including a negative case where a deliberately resampled proxy is

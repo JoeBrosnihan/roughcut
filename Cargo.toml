@@ -1,9 +1,14 @@
 ﻿[workspace]
 resolver = "2"
-members = ["crates/roughcut-core", "crates/roughcut-mpv", "crates/roughcut-app"]
+members = [
+    "crates/roughcut-core",
+    "crates/roughcut-mpv",
+    "crates/roughcut-app",
+    "crates/roughcut-cli",
+]
 
 [workspace.package]
-version = "0.19.3"
+version = "0.20.0"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-or-later"

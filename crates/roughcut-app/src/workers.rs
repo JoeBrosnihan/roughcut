@@ -725,27 +725,7 @@ pub fn tile_for_frame(frame: i64, duration_frames: i64, tiles: usize) -> usize {
     ((t * tiles as f64) as usize).min(tiles - 1)
 }
 
-/// Identifies a file, the version of it on disk right now, and whatever else
-/// would change what is derived from it.
-///
-/// A rotated or replaced source therefore misses rather than serving a stale
-/// strip or a waveform of the wrong audio, and no explicit invalidation is
-/// needed anywhere.
-fn fingerprint(path: &std::path::Path, extra: &[i64]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut h);
-    extra.hash(&mut h);
-    if let Ok(meta) = std::fs::metadata(path) {
-        meta.len().hash(&mut h);
-        if let Ok(t) = meta.modified() {
-            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                d.as_nanos().hash(&mut h);
-            }
-        }
-    }
-    h.finish()
-}
+use roughcut_core::paths::fingerprint;
 
 /// Identifies a cached sheet.
 fn cache_key(path: &std::path::Path, duration_frames: i64, tiles: usize) -> String {
