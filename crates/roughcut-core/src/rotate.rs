@@ -143,9 +143,8 @@ fn run_ffmpeg(
     if let Some(f) = force_format {
         cmd.args(["-f", f]);
     }
-    let output = cmd
-        .arg(temp)
-        .output()
+    cmd.arg(temp);
+    let output = crate::tools::run("rotate", &mut cmd)
         .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
     Ok((
         output.status.success(),

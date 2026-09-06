@@ -70,9 +70,7 @@ pub fn find_model(whisper: &Path) -> Option<PathBuf> {
 
 /// Extract `source`'s audio to `dest` as 16 kHz mono WAV.
 pub fn extract_audio(ffmpeg: &Path, source: &Path, dest: &Path) -> Result<()> {
-    let output = background_command(ffmpeg)
-        .args(wav_args(source, dest))
-        .output()
+    let output = crate::tools::run("wav", background_command(ffmpeg).args(wav_args(source, dest)))
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
     if !output.status.success() {
         bail!(
@@ -146,11 +144,13 @@ pub fn transcribe(
 
     extract_audio(ffmpeg, source, &wav)?;
 
-    let output = background_command(whisper)
-        .args(whisper_args(model, &wav, &prefix))
-        // whisper.cpp finds its CUDA and ggml DLLs beside the executable.
-        .current_dir(whisper.parent().unwrap_or(Path::new(".")))
-        .output();
+    let output = crate::tools::run(
+        "whisper",
+        background_command(whisper)
+            .args(whisper_args(model, &wav, &prefix))
+            // whisper.cpp finds its CUDA and ggml DLLs beside the executable.
+            .current_dir(whisper.parent().unwrap_or(Path::new("."))),
+    );
     let output = match output {
         Ok(o) => o,
         Err(e) => {

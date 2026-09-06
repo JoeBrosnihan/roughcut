@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -111,6 +112,75 @@ fn well_known_dirs() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+// ---------------------------------------------------------------------------
+// The child-process ledger
+//
+// Every substantial child this program runs — a proxy encode, a filmstrip, a
+// transcription — goes through `run`, which names it, times it, and tells
+// whoever is listening when it starts and stops. The point is that "ffmpeg is
+// eating the machine" stops being a mystery: something can watch the ledger
+// and say *which* ffmpeg, doing *what*, holding *how much*.
+//
+// The ledger itself carries no policy and no platform code: it reports, and
+// the observer (installed by the application; see the app's `gauge` module)
+// decides what to measure and when to complain. With no observer installed —
+// the CLI, the tests — `run` degrades to exactly `.output()` plus a debug log.
+// ---------------------------------------------------------------------------
+
+/// What a measured run reports as it happens.
+#[derive(Debug, Clone, Copy)]
+pub enum RunEvent<'a> {
+    Started { pid: u32, label: &'a str },
+    Finished { pid: u32, label: &'a str, seconds: f64, ok: bool },
+}
+
+type RunObserver = Box<dyn Fn(RunEvent<'_>) + Send + Sync>;
+
+static RUN_OBSERVER: OnceLock<RunObserver> = OnceLock::new();
+
+/// Install the process-wide observer. First caller wins; later calls are
+/// ignored, which keeps a second window or a test harness from fighting over
+/// it.
+pub fn observe_runs(observer: RunObserver) {
+    let _ = RUN_OBSERVER.set(observer);
+}
+
+pub fn note_run_started(pid: u32, label: &str) {
+    if let Some(f) = RUN_OBSERVER.get() {
+        f(RunEvent::Started { pid, label });
+    }
+}
+
+pub fn note_run_finished(pid: u32, label: &str, seconds: f64, ok: bool) {
+    if let Some(f) = RUN_OBSERVER.get() {
+        f(RunEvent::Finished { pid, label, seconds, ok });
+    }
+}
+
+/// `.output()`, with a name attached.
+///
+/// Identical contract to [`Command::output`] — stdin closed, stdout and stderr
+/// captured — plus the start/finish notifications above and a debug line with
+/// the duration. Everything long-running should come through here; a child
+/// that bypasses the ledger is invisible to every diagnostic built on it.
+pub fn run(label: &str, cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    let started = std::time::Instant::now();
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id();
+    note_run_started(pid, label);
+    let output = child.wait_with_output();
+    let seconds = started.elapsed().as_secs_f64();
+    let ok = output.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    note_run_finished(pid, label, seconds, ok);
+    log::debug!("{label}: {seconds:.1}s, ok={ok}");
+    output
 }
 
 /// Look for `name` on `PATH`, then in the well-known directories.
@@ -270,6 +340,70 @@ pub fn expand_drop(path: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::sync::Mutex as StdMutex;
+
+    // The observer is process-wide and can be installed once, so every
+    // assertion about it lives in this one test.
+    static EVENTS: StdMutex<Option<mpsc::Sender<(u32, String, bool)>>> = StdMutex::new(None);
+
+    #[test]
+    fn a_measured_run_reports_itself() {
+        let (tx, rx) = mpsc::channel();
+        *EVENTS.lock().unwrap() = Some(tx);
+        observe_runs(Box::new(|event| {
+            let guard = EVENTS.lock().unwrap();
+            let Some(tx) = guard.as_ref() else { return };
+            match event {
+                RunEvent::Started { pid, label } => {
+                    let _ = tx.send((pid, format!("start:{label}"), true));
+                }
+                RunEvent::Finished { pid, label, seconds, ok } => {
+                    assert!(seconds >= 0.0);
+                    let _ = tx.send((pid, format!("finish:{label}"), ok));
+                }
+            }
+        }));
+
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "exit 0"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = Command::new("true");
+
+        let output = run("probe-test", &mut cmd).expect("the shell should run");
+        assert!(output.status.success());
+
+        let (pid_a, first, _) = rx.recv().expect("a start event");
+        let (pid_b, second, ok) = rx.recv().expect("a finish event");
+        assert_eq!(first, "start:probe-test");
+        assert_eq!(second, "finish:probe-test");
+        assert_eq!(pid_a, pid_b, "start and finish describe the same child");
+        assert_ne!(pid_a, 0);
+        assert!(ok, "exit 0 is a success");
+
+        // A failing child is reported as one, not hidden.
+        #[cfg(windows)]
+        let mut bad = {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "exit 3"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut bad = Command::new("false");
+        let _ = run("probe-test", &mut bad).expect("spawning still works");
+        let _ = rx.recv().expect("start");
+        let (_, _, ok) = rx.recv().expect("finish");
+        assert!(!ok, "exit 3 is a failure");
+    }
 }
 
 #[cfg(test)]

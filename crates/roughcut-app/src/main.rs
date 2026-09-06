@@ -14,6 +14,7 @@
 
 mod actions;
 mod app;
+mod gauge;
 mod keys;
 mod monitor;
 mod settings;

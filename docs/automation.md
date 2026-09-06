@@ -2,9 +2,9 @@
 
 `roughcut-cli` is the whole editor with the picture taken away: the same
 project files, the same timeline arithmetic, the same MLT writer. It exists so
-that an agent — Claude Code, or anything else that can run a command — can
-assemble a cut end to end, and so that the parts of editing that are typing
-rather than watching stop being done by hand.
+an agent, a script, or anything else that can run a command can assemble a cut
+end to end, and so that the parts of editing that are typing rather than
+watching stop being done by hand.
 
 It has two front doors and one implementation.
 
@@ -96,8 +96,8 @@ and no polling in the idle loop — and:
 - with unsaved edits, changes nothing and warns, because there is no merge to
   do and no way to guess which side is wanted.
 
-So the ordinary arrangement works: leave Roughcut open on the cut, edit from
-Claude Code, and alt-tab back to watch what happened.
+So the ordinary arrangement works: leave Roughcut open on the cut, edit from a
+shell or an MCP client, and alt-tab back to watch what happened.
 
 The two share their caches as well. `roughcut_core::paths` defines the
 configuration and cache directories once for both binaries, so a transcript the
@@ -108,17 +108,24 @@ in `%LOCALAPPDATA%\Programs\Roughcut` reads the real one.
 
 ## As an MCP server
 
-`roughcut-cli mcp` speaks JSON-RPC over stdin and stdout. Register it:
+`roughcut-cli mcp` speaks JSON-RPC over stdin and stdout — the stdio transport
+every MCP client supports. Nothing about it is particular to any one client, and
+nothing in Roughcut depends on one existing. Register it however that client
+registers a stdio server; most take some spelling of:
 
-```
-claude mcp add roughcut -- <path>\roughcut-cli.exe mcp
+```json
+{
+  "mcpServers": {
+    "roughcut": {
+      "command": "<path>/roughcut-cli.exe",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-or, pinned to one project so no call has to name it:
-
-```
-claude mcp add roughcut --env ROUGHCUT_PROJECT=D:\cuts\holiday.roughcut -- <path>\roughcut-cli.exe mcp
-```
+Add an `env` of `{"ROUGHCUT_PROJECT": "D:/cuts/holiday.roughcut"}` to pin it to
+one project, so no call has to name it.
 
 Every command is offered as a tool, with `readOnlyHint` taken from the table's
 `writes` column. A command that fails comes back as a result with `isError`

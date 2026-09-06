@@ -92,6 +92,9 @@ pub fn to_mp4(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot run melt at {}", melt.display()))?;
+    let render_started = std::time::Instant::now();
+    let render_pid = child.id();
+    crate::tools::note_run_started(render_pid, "render");
 
     // stderr is drained on a thread of its own so that cancelling never waits
     // on melt to say something. Progress arrives on melt's own timer rather
@@ -129,6 +132,13 @@ pub fn to_mp4(
             None => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     };
+
+    crate::tools::note_run_finished(
+        render_pid,
+        "render",
+        render_started.elapsed().as_secs_f64(),
+        status.success() && !killed,
+    );
 
     // The pipe is closed now, so the reader is finishing; collect the rest.
     if let Some(handle) = reader {

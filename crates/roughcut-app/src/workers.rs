@@ -609,9 +609,7 @@ fn mix_bed(
     if let Some(dir) = dest.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let output = quiet_command(ffmpeg)
-        .args(args)
-        .output()
+    let output = roughcut_core::tools::run("mix", quiet_command(ffmpeg).args(args))
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(dest);
@@ -905,8 +903,7 @@ fn grab_strip(
         .args(["-map", "[o]", "-frames:v", "1"])
         .args(["-f", "image2pipe", "-vcodec", "png", "-"]);
 
-    let output = cmd
-        .output()
+    let output = roughcut_core::tools::run("sheet", &mut cmd)
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
     if !output.status.success() || output.stdout.is_empty() {
         bail!(
@@ -931,8 +928,8 @@ fn grab_frame(
     // Input seek (`-ss` before `-i`) is orders of magnitude faster than output
     // seek and is accurate enough for a bin thumbnail.
     let seconds = frame_to_seconds(frame, fps);
-    let output = background_command(ffmpeg)
-        .args(["-v", "error", "-threads", &background_threads().to_string()])
+    let mut cmd = background_command(ffmpeg);
+    cmd.args(["-v", "error", "-threads", &background_threads().to_string()])
         .args(["-ss", &format!("{seconds:.6}")])
         .arg("-i")
         .arg(path)
@@ -946,8 +943,8 @@ fn grab_frame(
             "-vcodec",
             "png",
             "-",
-        ])
-        .output()
+        ]);
+    let output = roughcut_core::tools::run("poster", &mut cmd)
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
 
     if !output.status.success() || output.stdout.is_empty() {

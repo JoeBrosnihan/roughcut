@@ -86,10 +86,15 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                     let config = crate::settings::config_dir()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "?".into());
+                    // What the background workers hold right now — the first
+                    // place to look when the machine feels slow.
+                    let working = crate::gauge::live_line()
+                        .unwrap_or_else(|| "nothing running".to_string());
                     for line in [
                         format!("version: {}", env!("CARGO_PKG_VERSION")),
                         format!("binary:  {exe}"),
                         format!("config:  {config}"),
+                        format!("work:    {working}"),
                     ] {
                         ui.label(
                             egui::RichText::new(line)

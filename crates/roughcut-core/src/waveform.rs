@@ -130,12 +130,21 @@ pub fn extract(ffmpeg: &Path, path: &Path, buckets: usize) -> Result<Vec<u8>> {
         .spawn()
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
 
+    let started = std::time::Instant::now();
+    let pid = child.id();
+    crate::tools::note_run_started(pid, "waveform");
     let stdout = child.stdout.take().context("ffmpeg gave no output")?;
     let result = peaks(stdout, buckets);
     if result.is_err() {
         let _ = child.kill();
     }
     let status = child.wait().context("ffmpeg did not finish cleanly")?;
+    crate::tools::note_run_finished(
+        pid,
+        "waveform",
+        started.elapsed().as_secs_f64(),
+        status.success() && result.is_ok(),
+    );
     let peaks = result?;
 
     // Samples arrived, so there is something worth drawing. ffmpeg complaining

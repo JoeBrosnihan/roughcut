@@ -171,6 +171,29 @@ which binary and which config directory it is using.
 | `RUST_LOG` | Log filter. The bin target is `roughcut`, so use `roughcut=debug` |
 | `ROUGHCUT_REGEN_KEYS` | Rewrite `KEYS.md` from the key table when running its test |
 | `ROUGHCUT_KEEP_OUTPUT` | Keep the frame-accuracy test's working files instead of deleting them |
+| `ROUGHCUT_CHILD_RAM_WARN_MB` | Memory the background children may hold together before the window warns (default 8192) |
+
+## When the machine slows down
+
+Roughcut's real load lives in child processes — ffmpeg for proxies,
+filmstrips and waveforms, whisper for transcripts, melt for renders — so
+"Roughcut is slow" is almost always "its children are heavy". Every
+substantial child goes through one ledger (`roughcut_core::tools::run`), and
+three things watch it:
+
+1. **Press `?`.** The overlay's `work:` line shows what is running right now
+   and how much memory it holds together.
+2. **A toast fires on its own** when the children cross the budget above,
+   naming the worst offender — "background work is holding 9.1 GB (4
+   children; worst: sheet at 3.2 GB)".
+3. **The log** gets a line per expensive child (label, seconds, peak memory)
+   and a per-label summary on exit, beside the seek-latency summary. Release
+   builds write it via `ROUGHCUT_LOG_FILE`.
+
+For a build without the gauge, or to watch the whole machine including
+Shotcut's own processes, `tools/watch-children.ps1` samples every
+ffmpeg/melt/whisper once a second, attributes each to whoever spawned it, and
+appends a CSV — so a slowdown can be diagnosed after it has passed.
 
 ## The executable's icon
 

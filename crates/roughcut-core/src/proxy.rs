@@ -132,10 +132,11 @@ pub fn generate(
         }
     }
 
-    let output = background_command(ffmpeg)
-        .args(proxy_args(&clip.path, &dest))
-        .output()
-        .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
+    let output = crate::tools::run(
+        "proxy",
+        background_command(ffmpeg).args(proxy_args(&clip.path, &dest)),
+    )
+    .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&dest);
         bail!(

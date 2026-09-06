@@ -411,6 +411,10 @@ pub struct RoughcutApp {
 impl RoughcutApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
+        // From here on, every child process is on the ledger and the gauge
+        // watches what it holds. Before the first worker exists, so nothing
+        // can slip through unmeasured.
+        crate::gauge::install(cc.egui_ctx.clone());
 
         let settings = Settings::load();
         let tools = Tools::discover()
@@ -3097,6 +3101,11 @@ impl eframe::App for RoughcutApp {
         // measured rather than reasoned about. Costs one `Instant::now` per
         // phase and prints nothing unless something was actually slow.
         let mut timings = Timings::default();
+        // A memory alarm from the gauge becomes a toast. Polling a mutex once
+        // a pass costs nothing; the gauge already woke the loop when it fired.
+        if let Some(alarm) = crate::gauge::take_alarm() {
+            self.set_status(alarm, StatusKind::Warn);
+        }
         self.handle_dropped_files(ctx);
         timings.mark("dropped");
         self.drain_workers(ctx);
@@ -3202,6 +3211,8 @@ impl eframe::App for RoughcutApp {
         }
         let _ = self.monitor.shutdown();
         self.settings.save();
+        // What the background work cost, next to the seek-latency summary.
+        crate::gauge::log_summary();
 
         // The snapshot is always left behind, marked according to whether it
         // holds unsaved work. Quitting dirty prompts on next launch; quitting
