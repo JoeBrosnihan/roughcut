@@ -53,12 +53,25 @@ pub fn grid_for(tiles: usize) -> (usize, usize) {
     (cols, tiles.div_ceil(cols))
 }
 
-/// How many tiles are asked of ffmpeg at once.
+/// How many tiles are asked of ffmpeg at once, for footage of about 1080p.
 ///
 /// Every tile is a separate `-i`, so a whole sheet in one command would build
 /// a command line long enough to be a problem on Windows. Batching also means
 /// one impossible seek costs a batch rather than the entire sheet.
 const BATCH: usize = 16;
+
+/// Tiles per ffmpeg for footage of this size.
+///
+/// Every `-i` in a batch is a live decoder holding reference frames for the
+/// whole run, so the memory of one sheet command scales with batch × frame
+/// size. Sixteen 4K decoders in one process is over a gigabyte before a
+/// single tile lands; across four workers that was most of a machine. Fewer,
+/// larger frames per launch keeps every sheet command near what a 1080p batch
+/// of sixteen costs, whatever the source.
+fn batch_for(pixels: u64) -> usize {
+    const REFERENCE: u64 = 1920 * 1080;
+    ((BATCH as u64 * REFERENCE) / pixels.max(1)).clamp(2, BATCH as u64) as usize
+}
 
 /// Work the user is waiting on goes first.
 ///
@@ -96,6 +109,10 @@ pub enum Job {
         tiles: usize,
         /// A photograph: one frame, at the start, and no seeking to reach it.
         still: bool,
+        /// Frame size of the file the tiles are cut from — the proxy's when a
+        /// proxy is being read — which decides how many decoders one ffmpeg
+        /// may hold open at once.
+        pixels: u64,
         /// Where finished sheets are kept between sessions. `None` disables
         /// caching, which only happens if there is nowhere to write.
         cache_dir: Option<PathBuf>,
@@ -295,6 +312,11 @@ impl WorkerPool {
             })
             .collect();
 
+        // When memory pressure lifts, the workers held by it are asleep on
+        // this condvar with nothing else to wake them.
+        let for_relief = shared.clone();
+        crate::gauge::on_relief(move || for_relief.wake.notify_all());
+
         Self {
             shared,
             results,
@@ -446,12 +468,23 @@ fn worker_loop(shared: Arc<Shared>, role: Role) {
                 // condvar as the rest and wakes only when there is a clip
                 // waiting.
                 if !q.suspended || role == Role::Transcriber {
+                    // Speculative work waits while the children already
+                    // running hold more memory than the budget allows. Not a
+                    // warning to act on — the pool simply stops starting more
+                    // until what is running finishes; the gauge wakes this
+                    // condvar when it does. Work someone is waiting on (the
+                    // high queue) is never held.
+                    let room = !crate::gauge::over_budget();
                     // The reserved thread never touches the low queue, so it
                     // is always free for the next thing the user asks for.
                     let next = match role {
                         Role::Interactive => q.high.pop_front(),
-                        Role::Transcriber => q.slow.pop_front(),
-                        Role::General => q.high.pop_front().or_else(|| q.low.pop_front()),
+                        Role::Transcriber if room => q.slow.pop_front(),
+                        Role::Transcriber => None,
+                        Role::General => q
+                            .high
+                            .pop_front()
+                            .or_else(|| if room { q.low.pop_front() } else { None }),
                     };
                     if let Some(job) = next {
                         break job;
@@ -488,6 +521,7 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             fps,
             tiles,
             still,
+            pixels,
             cache_dir,
         } => {
             let result = match &shared.tools.ffmpeg {
@@ -498,6 +532,7 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                     fps,
                     if still { 1 } else { tiles },
                     still,
+                    pixels,
                     cache_dir.as_deref(),
                 ),
                 None => Err(anyhow::anyhow!("ffmpeg is not available")),
@@ -754,6 +789,7 @@ fn read_cached(file: &std::path::Path, tiles: usize) -> Option<Sheet> {
 /// Kept on disk between sessions. Reopening a project used to re-extract every
 /// thumbnail from scratch, which on a large bin is minutes of ffmpeg before
 /// any picture appears; now it is a file read.
+#[allow(clippy::too_many_arguments)]
 fn make_sheet(
     ffmpeg: &std::path::Path,
     path: &std::path::Path,
@@ -761,6 +797,7 @@ fn make_sheet(
     fps: Rational,
     tiles: usize,
     still: bool,
+    pixels: u64,
     cache_dir: Option<&std::path::Path>,
 ) -> Result<Sheet> {
     let tiles = tiles.max(1);
@@ -788,10 +825,11 @@ fn make_sheet(
     // Each batch is one ffmpeg run producing a horizontal strip; the strips
     // are then cut up and packed into the grid. One launch per tile — which is
     // what this used to do — costs more in process startup than the decoding.
+    let batch = batch_for(pixels);
     let mut strips: Vec<(usize, image::RgbaImage)> = Vec::new();
-    for (b, chunk) in frames.chunks(BATCH).enumerate() {
+    for (b, chunk) in frames.chunks(batch).enumerate() {
         match grab_strip(ffmpeg, path, chunk, fps) {
-            Ok(img) => strips.push((b * BATCH, img)),
+            Ok(img) => strips.push((b * batch, img)),
             // Odd files exist, and a seek that lands nowhere makes `hstack`
             // fail for the whole batch. Falling back frame by frame is slow
             // but tolerates individual gaps, so a difficult clip still gets
@@ -800,7 +838,7 @@ fn make_sheet(
                 log::debug!("batch {b} of {} failed: {e:#}", path.display());
                 for (k, &f) in chunk.iter().enumerate() {
                     if let Ok(img) = grab_frame(ffmpeg, path, f, fps) {
-                        strips.push((b * BATCH + k, img));
+                        strips.push((b * batch + k, img));
                     }
                 }
             }
@@ -863,27 +901,32 @@ fn pack(strips: &[(usize, image::RgbaImage)], tiles: usize) -> Result<image::Rgb
     Ok(sheet)
 }
 
-/// One ffmpeg run: a fast input seek per frame, scaled and stacked side by
-/// side by the filter graph.
-fn grab_strip(
-    ffmpeg: &std::path::Path,
+/// The full argument list for one strip run.
+///
+/// Options placed before an `-i` apply to that input and no other, so the
+/// decoder thread bound goes in front of **every** input. It used to be
+/// passed once, at the front, which bounded the first decoder and left the
+/// other fifteen helping themselves to a thread per core — and a
+/// frame-threaded decoder holds one frame in flight per thread, so on 4K
+/// footage each of those inputs held hundreds of megabytes it was told not
+/// to. That, times four workers, was gigabytes.
+fn strip_args(
     path: &std::path::Path,
     frames: &[i64],
     fps: Rational,
-) -> Result<image::RgbaImage> {
-    if frames.len() == 1 {
-        return grab_frame(ffmpeg, path, frames[0], fps);
-    }
+) -> Vec<std::ffi::OsString> {
     let n = frames.len();
-    let mut cmd = background_command(ffmpeg);
-    cmd.args(["-v", "error", "-threads", &background_threads().to_string()]);
+    let threads = background_threads().to_string();
+    let mut args: Vec<std::ffi::OsString> = vec!["-v".into(), "error".into()];
     for &frame in frames {
         // Input seek (`-ss` before `-i`) is orders of magnitude faster than
         // output seek and is accurate enough for a bin thumbnail.
-        cmd.arg("-ss")
-            .arg(format!("{:.6}", frame_to_seconds(frame, fps)))
-            .arg("-i")
-            .arg(path);
+        args.push("-threads".into());
+        args.push(threads.clone().into());
+        args.push("-ss".into());
+        args.push(format!("{:.6}", frame_to_seconds(frame, fps)).into());
+        args.push("-i".into());
+        args.push(path.into());
     }
 
     let mut filter = String::new();
@@ -899,9 +942,28 @@ fn grab_strip(
     }
     filter.push_str(&format!("hstack=inputs={n}[o]"));
 
-    cmd.args(["-filter_complex", &filter])
-        .args(["-map", "[o]", "-frames:v", "1"])
-        .args(["-f", "image2pipe", "-vcodec", "png", "-"]);
+    for a in ["-filter_complex", &filter, "-map", "[o]", "-frames:v", "1"] {
+        args.push(a.into());
+    }
+    for a in ["-f", "image2pipe", "-vcodec", "png", "-"] {
+        args.push(a.into());
+    }
+    args
+}
+
+/// One ffmpeg run: a fast input seek per frame, scaled and stacked side by
+/// side by the filter graph.
+fn grab_strip(
+    ffmpeg: &std::path::Path,
+    path: &std::path::Path,
+    frames: &[i64],
+    fps: Rational,
+) -> Result<image::RgbaImage> {
+    if frames.len() == 1 {
+        return grab_frame(ffmpeg, path, frames[0], fps);
+    }
+    let mut cmd = background_command(ffmpeg);
+    cmd.args(strip_args(path, frames, fps));
 
     let output = roughcut_core::tools::run("sheet", &mut cmd)
         .with_context(|| format!("cannot run ffmpeg at {}", ffmpeg.display()))?;
@@ -1082,6 +1144,7 @@ mod tests {
             fps: Rational::new(30, 1),
             tiles: 1,
             still: false,
+            pixels: 1920 * 1080,
             cache_dir: None,
         };
         let sheet = Job::Thumbs {
@@ -1091,6 +1154,7 @@ mod tests {
             fps: Rational::new(30, 1),
             tiles: SCRUB_TILES,
             still: false,
+            pixels: 1920 * 1080,
             cache_dir: None,
         };
         assert_eq!(poster.priority(), Priority::High);
@@ -1181,7 +1245,7 @@ mod tests {
             .success());
 
         // An hour of invented duration, exactly as a real still is given.
-        let sheet = make_sheet(&ffmpeg, &png, 1800, Rational::new(30, 1), 1, true, None)
+        let sheet = make_sheet(&ffmpeg, &png, 1800, Rational::new(30, 1), 1, true, 640 * 480, None)
             .expect("a photograph must produce a poster");
         assert_eq!(sheet.tiles, 1);
         assert!(sheet.width > 0 && sheet.height > 0);
@@ -1192,7 +1256,7 @@ mod tests {
 
         // And the same call without the flag is the bug, still reproducible.
         assert!(
-            make_sheet(&ffmpeg, &png, 1800, Rational::new(30, 1), 1, false, None).is_err(),
+            make_sheet(&ffmpeg, &png, 1800, Rational::new(30, 1), 1, false, 640 * 480, None).is_err(),
             "seeking into a single image should fail rather than quietly work"
         );
 
@@ -1312,6 +1376,7 @@ mod tests {
                 fps: Rational::new(30, 1),
                 tiles: SCRUB_TILES,
                 still: false,
+                pixels: 1920 * 1080,
                 cache_dir: None,
             });
         }
@@ -1331,9 +1396,49 @@ mod tests {
             fps: Rational::new(30, 1),
             tiles: 1,
             still: false,
+            pixels: 1920 * 1080,
             cache_dir: None,
         });
         assert!(!pool.prioritise_sheet(poster), "a poster is not on the low queue");
+    }
+
+    /// The memory of one sheet command is batch × decoder, so bigger frames
+    /// must mean smaller batches.
+    #[test]
+    fn a_batch_shrinks_as_the_frames_grow() {
+        // The reference size takes the full batch, and a 540p proxy — the
+        // file sheets are usually cut from — is well under it.
+        assert_eq!(batch_for(1920 * 1080), BATCH);
+        assert_eq!(batch_for(960 * 540), BATCH);
+        // 4K is four times the pixels, so a quarter of the decoders.
+        assert_eq!(batch_for(3840 * 2160), BATCH / 4);
+        // However large the frame, batches still make progress.
+        assert_eq!(batch_for(u64::MAX / 4), 2);
+        assert_eq!(batch_for(0), BATCH);
+    }
+
+    /// Every `-i` in a strip command must carry its own thread bound.
+    ///
+    /// Options before an `-i` apply to that input only. The bound used to be
+    /// passed once, at the front, which limited the first decoder and let the
+    /// other fifteen take a thread per core each — on 4K footage, hundreds of
+    /// megabytes per input that the pool believed it had forbidden.
+    #[test]
+    fn every_input_of_a_strip_is_thread_bounded() {
+        let frames: Vec<i64> = vec![10, 20, 30, 40, 50];
+        let args = strip_args(std::path::Path::new("a.mp4"), &frames, Rational::new(30, 1));
+        let text: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
+        let inputs = text.iter().filter(|a| **a == "-i").count();
+        assert_eq!(inputs, frames.len());
+        for (at, arg) in text.iter().enumerate() {
+            if *arg == "-i" {
+                assert_eq!(
+                    text[at - 4],
+                    "-threads",
+                    "input at {at} is missing its own decoder bound"
+                );
+            }
+        }
     }
 
     #[test]

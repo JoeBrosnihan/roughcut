@@ -11,10 +11,12 @@
 //! 2. **A record per finished child** — label, seconds, peak memory — logged,
 //!    loudly when the peak was large, and folded into per-label statistics
 //!    that are written out on exit next to the seek-latency summary.
-//! 3. **An alarm** — when the children together cross a budget (default
-//!    8 GB, `ROUGHCUT_CHILD_RAM_WARN_MB`), one toast names the worst
-//!    offender. Once per burst, not per sample: the point is to be seen, not
-//!    to nag.
+//! 3. **A budget** — when the children together cross it (default 4 GB,
+//!    `ROUGHCUT_CHILD_RAM_BUDGET_MB`), the worker pool stops starting new
+//!    speculative work until enough of what is running has finished. The
+//!    application manages its own appetite; nothing is surfaced for the user
+//!    to act on, because there is nothing they should have to do. The hold
+//!    is logged, and the `?` overlay's work line says so while it lasts.
 //!
 //! Idle cost is zero. The sampler blocks on a condvar whenever no child is
 //! alive, which is §3's rule applied to diagnostics: watching for a problem
@@ -46,9 +48,10 @@ struct State {
     live: Vec<Live>,
     stats: Vec<LabelStat>,
     /// Set when the budget is crossed, cleared when usage falls back under
-    /// half of it — that hysteresis is what makes it one toast per burst.
-    alarmed: bool,
-    alarm: Option<String>,
+    /// half of it. While set, the worker pool starts no new speculative work
+    /// — that hysteresis is what stops the pool flapping at the boundary,
+    /// starting one job per sample only to trip the budget again.
+    over_budget: bool,
     most_at_once: usize,
     most_bytes: u64,
 }
@@ -57,15 +60,20 @@ struct Gauge {
     state: Mutex<State>,
     wake: Condvar,
     budget_bytes: u64,
-    ctx: egui::Context,
 }
 
 static GAUGE: OnceLock<Gauge> = OnceLock::new();
 
-const DEFAULT_BUDGET_MB: u64 = 8 * 1024;
+/// Told when the budget stops being exceeded, so the worker pool's condvar
+/// can be woken — the workers held by the budget are asleep on it with
+/// nothing else coming to wake them.
+#[allow(clippy::type_complexity)]
+static RELIEF: Mutex<Option<Box<dyn Fn() + Send + Sync>>> = Mutex::new(None);
+
+const DEFAULT_BUDGET_MB: u64 = 4 * 1024;
 
 fn budget_from_env() -> u64 {
-    std::env::var("ROUGHCUT_CHILD_RAM_WARN_MB")
+    std::env::var("ROUGHCUT_CHILD_RAM_BUDGET_MB")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|mb| *mb > 0)
@@ -76,12 +84,11 @@ fn budget_from_env() -> u64 {
 
 /// Wire the gauge into the ledger and start the sampler. Call once, at
 /// startup; later calls do nothing.
-pub fn install(ctx: egui::Context) {
+pub fn install() {
     let _ = GAUGE.get_or_init(|| Gauge {
         state: Mutex::new(State::default()),
         wake: Condvar::new(),
         budget_bytes: budget_from_env(),
-        ctx,
     });
 
     roughcut_core::tools::observe_runs(Box::new(|event| {
@@ -150,7 +157,17 @@ impl Gauge {
         stat.total_seconds += seconds;
         stat.worst_seconds = stat.worst_seconds.max(seconds);
         stat.worst_bytes = stat.worst_bytes.max(peak);
+        // A child leaving can be what lifts the hold, and once the last one is
+        // gone the sampler is asleep — this is the only place left to notice.
+        let total: u64 = st.live.iter().map(|l| l.last_bytes).sum();
+        let relieved = st.over_budget && (st.live.is_empty() || total < self.budget_bytes / 2);
+        if relieved {
+            st.over_budget = false;
+        }
         drop(st);
+        if relieved {
+            relieve();
+        }
 
         // A child that was big or slow earns a line; the rest stay at debug
         // so a working session does not scroll the log off the screen.
@@ -179,25 +196,28 @@ impl Gauge {
             let total: u64 = st.live.iter().map(|l| l.last_bytes).sum();
             st.most_bytes = st.most_bytes.max(total);
 
-            if total > self.budget_bytes && !st.alarmed {
-                st.alarmed = true;
+            if total > self.budget_bytes && !st.over_budget {
+                st.over_budget = true;
                 let worst = st
                     .live
                     .iter()
                     .max_by_key(|l| l.last_bytes)
                     .map(|l| format!("{} at {}", l.label, human(l.last_bytes)))
                     .unwrap_or_default();
-                st.alarm = Some(format!(
-                    "background work is holding {} of memory ({} children; worst: {})",
+                // For the log, not the user: the hold is the application
+                // managing itself, and there is nothing anyone should do
+                // about it.
+                log::info!(
+                    "background work is holding {} ({} children; worst: {}) — pausing new work until it settles",
                     human(total),
                     st.live.len(),
                     worst
-                ));
-                // The event loop is ControlFlow::Wait; without this the toast
-                // would sit unread until the next keypress.
-                self.ctx.request_repaint();
-            } else if st.alarmed && total < self.budget_bytes / 2 {
-                st.alarmed = false;
+                );
+            } else if st.over_budget && total < self.budget_bytes / 2 {
+                st.over_budget = false;
+                drop(st);
+                relieve();
+                st = self.state.lock().unwrap();
             }
 
             drop(st);
@@ -207,10 +227,26 @@ impl Gauge {
     }
 }
 
-/// The alarm, if one fired since last asked. The UI turns it into a toast.
-pub fn take_alarm() -> Option<String> {
-    let gauge = GAUGE.get()?;
-    gauge.state.lock().unwrap().alarm.take()
+/// Whether the children together hold more memory than the budget allows.
+/// The worker pool asks before starting anything speculative; work the user
+/// is waiting on is never held. Always room when no gauge is installed — the
+/// tests and the CLI have no sampler, so a stale `true` could never clear.
+pub fn over_budget() -> bool {
+    GAUGE
+        .get()
+        .is_some_and(|g| g.state.lock().unwrap().over_budget)
+}
+
+/// Register the wake-up call for when the budget stops being exceeded. The
+/// last registration wins; there is one pool.
+pub fn on_relief(f: impl Fn() + Send + Sync + 'static) {
+    *RELIEF.lock().unwrap() = Some(Box::new(f));
+}
+
+fn relieve() {
+    if let Some(f) = RELIEF.lock().unwrap().as_ref() {
+        f();
+    }
 }
 
 /// One line for the help overlay, or `None` when nothing is running.
@@ -224,8 +260,16 @@ pub fn live_line() -> Option<String> {
     let mut labels: Vec<&str> = st.live.iter().map(|l| l.label).collect();
     labels.sort_unstable();
     labels.dedup();
+    // The hold is the pool managing its own appetite, but while it is on,
+    // "why has the queue stopped" deserves an answer in the same place as
+    // "where did the memory go".
+    let held = if st.over_budget {
+        " — over budget, new work is waiting"
+    } else {
+        ""
+    };
     Some(format!(
-        "{} running ({}), {}",
+        "{} running ({}), {}{held}",
         st.live.len(),
         labels.join(", "),
         human(total)
@@ -355,7 +399,7 @@ mod tests {
             eprintln!("skipped: no ffmpeg on this machine");
             return;
         };
-        install(egui::Context::default());
+        install();
 
         // Two seconds of synthetic video, held to wall-clock time with `-re`
         // — without it x264 finishes the whole thing in a fraction of a

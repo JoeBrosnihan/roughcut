@@ -377,6 +377,11 @@ pub struct RoughcutApp {
     sheet_clock: u64,
     thumb_requested: HashSet<ClipId>,
     sheet_requested: HashSet<ClipId>,
+    /// Sheets wanted while the clip's proxy is still being made. Building one
+    /// from a 4K original is over a hundred full-size decodes for pictures 96
+    /// pixels wide; the same sheet from the 540p proxy is a twentieth of the
+    /// work and the identical picture, so the sheet waits for the proxy.
+    pending_sheets: HashSet<ClipId>,
     pub proxy_state: HashMap<ClipId, ProxyState>,
     /// Clips whose file is being rewritten on disk right now. Rotating twice
     /// at once would have two ffmpeg processes racing for the same path.
@@ -414,7 +419,7 @@ impl RoughcutApp {
         // From here on, every child process is on the ledger and the gauge
         // watches what it holds. Before the first worker exists, so nothing
         // can slip through unmeasured.
-        crate::gauge::install(cc.egui_ctx.clone());
+        crate::gauge::install();
 
         let settings = Settings::load();
         let tools = Tools::discover()
@@ -485,6 +490,7 @@ impl RoughcutApp {
             sheet_clock: 0,
             thumb_requested: HashSet::new(),
             sheet_requested: HashSet::new(),
+            pending_sheets: HashSet::new(),
             proxy_state: HashMap::new(),
             rotating: HashSet::new(),
             toasts: Vec::new(),
@@ -693,6 +699,7 @@ impl RoughcutApp {
         self.source_frame = 0;
         self.playhead = 0;
         self.missing_media = project_io::missing_media(&self.project);
+        self.adopt_existing_proxies();
         self.set_status(
             if had_path {
                 "recovered — still unsaved, press Ctrl+S"
@@ -1307,6 +1314,7 @@ impl RoughcutApp {
             self.posters.remove(&id);
             self.sheets.remove(&id);
             self.sheet_requested.remove(&id);
+            self.pending_sheets.remove(&id);
             self.thumb_requested.remove(&id);
             self.proxy_state.remove(&id);
             self.selected_clip = next;
@@ -1901,8 +1909,9 @@ impl RoughcutApp {
             }
         }
         self.posters.remove(&id);
-            self.sheets.remove(&id);
-            self.sheet_requested.remove(&id);
+        self.sheets.remove(&id);
+        self.sheet_requested.remove(&id);
+        self.pending_sheets.remove(&id);
         self.thumb_requested.remove(&id);
         self.proxy_state.remove(&id);
         self.request_thumbnail(id);
@@ -2035,10 +2044,10 @@ impl RoughcutApp {
         self.import_order.clear();
         self.probe_results.clear();
         self.posters.clear();
-                self.sheets.clear();
-                self.sheet_requested.clear();
+        self.sheets.clear();
+        self.sheet_requested.clear();
+        self.pending_sheets.clear();
         self.thumb_requested.clear();
-                self.sheet_requested.clear();
         self.proxy_state.clear();
         self.missing_media.clear();
         self.monitor.clear();
@@ -2139,8 +2148,8 @@ impl RoughcutApp {
                 self.posters.clear();
                 self.sheets.clear();
                 self.sheet_requested.clear();
+                self.pending_sheets.clear();
                 self.thumb_requested.clear();
-                self.sheet_requested.clear();
                 self.proxy_state.clear();
                 self.workers.clear_queue();
                 self.monitor.clear();
@@ -2150,6 +2159,7 @@ impl RoughcutApp {
                 self.source_frame = 0;
                 self.playhead = 0;
                 self.missing_media = project_io::missing_media(&self.project);
+                self.adopt_existing_proxies();
                 self.revalidate_clips();
                 if let Some(dir) = path.parent() {
                     self.settings.last_project_dir = Some(dir.to_path_buf());
@@ -2401,6 +2411,7 @@ impl RoughcutApp {
             self.posters.remove(&id);
             self.sheets.remove(&id);
             self.sheet_requested.remove(&id);
+            self.pending_sheets.remove(&id);
             self.thumb_requested.remove(&id);
             self.set_status(format!("relinked {name}"), StatusKind::Info);
         }
@@ -2495,10 +2506,16 @@ impl RoughcutApp {
                         if let Some(c) = self.project.clip_mut(clip_id) {
                             c.proxy_path = Some(path);
                         }
+                        // The sheet that was waiting for this proxy can now be
+                        // built from it.
+                        self.flush_pending_sheet(clip_id);
                     }
                     Err(e) => {
                         self.proxy_state.insert(clip_id, ProxyState::Failed);
                         self.set_status(format!("proxy: {e:#}"), StatusKind::Warn);
+                        // No proxy is coming; the sheet builds from the
+                        // original after all.
+                        self.flush_pending_sheet(clip_id);
                     }
                 },
                 JobResult::Rotated { clip_id, result } => match result {
@@ -2673,6 +2690,13 @@ impl RoughcutApp {
         if !on {
             self.workers.clear_queue();
             self.proxy_state.clear();
+            // Clearing the queue dropped any tiles waiting in it, and the
+            // pending sheets were waiting for proxies that are no longer
+            // coming. Forget the requests; the bin re-asks for whatever is
+            // visible on its next pass, from the originals.
+            self.thumb_requested.clear();
+            self.sheet_requested.clear();
+            self.pending_sheets.clear();
             self.set_status("playing the originals", StatusKind::Info);
             return;
         }
@@ -2696,6 +2720,39 @@ impl RoughcutApp {
             format!("building proxies for {n} clip(s) — each one speeds up as it lands"),
             StatusKind::Info,
         );
+    }
+
+    /// Pick up the proxies a previous session already built, before anything
+    /// asks for a sheet or a frame.
+    ///
+    /// The project file never records proxy paths — a proxy is a cache — so a
+    /// freshly opened project starts with none, and everything derived from
+    /// `playback_path` would read the 4K originals until the background
+    /// re-probe worked its way through the bin. That window is exactly when
+    /// the bin first draws and asks for its sheets, so it was the most
+    /// expensive moment of the session. A proxy file only ever exists
+    /// complete and verified (it is renamed into place), so existence is
+    /// enough to adopt it here; the re-probe still runs afterwards and
+    /// discards any that no longer match their source.
+    fn adopt_existing_proxies(&mut self) {
+        if !self.settings.proxies_enabled {
+            return;
+        }
+        let Some(dir) = self
+            .settings
+            .resolve_proxy_dir(self.project_path.as_deref())
+        else {
+            return;
+        };
+        for clip in &mut self.project.clips {
+            if clip.still || clip.proxy_path.is_some() {
+                continue;
+            }
+            let proxy = roughcut_core::proxy::proxy_path(&dir, clip.id);
+            if proxy.is_file() {
+                clip.proxy_path = Some(proxy);
+            }
+        }
     }
 
     fn request_proxy(&mut self, id: ClipId, info: MediaInfo) {
@@ -2773,6 +2830,7 @@ impl RoughcutApp {
         self.sheets.remove(&id);
         self.thumb_requested.remove(&id);
         self.sheet_requested.remove(&id);
+        self.pending_sheets.remove(&id);
         self.monitor.reload();
     }
 
@@ -2836,24 +2894,79 @@ impl RoughcutApp {
         if already {
             return;
         }
-        let Some(clip) = self.project.clip(id) else {
-            return;
-        };
         if !self.tools.has_ffmpeg() {
             return;
         }
+        // A sheet is a hundred-odd decodes for 96-pixel tiles, so it waits
+        // for the 540p proxy rather than doing that work on a 4K original —
+        // same picture, a twentieth of the cost. The poster does not wait:
+        // it is one frame, and the bin is unusable without it. When the
+        // proxy lands (or fails, or is turned off) the pending sheet is
+        // re-requested and built from whatever there is.
+        if !poster && self.sheet_should_wait_for_proxy(id) {
+            self.pending_sheets.insert(id);
+            return;
+        }
+        let Some(clip) = self.project.clip(id) else {
+            return;
+        };
+        // The proxy when there is one: it is 540p, so every seek and
+        // decode is a fraction of the cost of the same work on the
+        // original, and it holds frame-for-frame the same picture.
+        let path = clip.playback_path().to_path_buf();
+        // How big each decode will be — the proxy's frame when the proxy is
+        // being read — so the pool can bound how many decoders one ffmpeg
+        // holds open at once.
+        let pixels = if clip.proxy_path.is_some() {
+            let h = u64::from(roughcut_core::proxy::PROXY_HEIGHT);
+            let w = h * u64::from(clip.width.max(1)) / u64::from(clip.height.max(1));
+            w * h
+        } else {
+            u64::from(clip.width.max(1)) * u64::from(clip.height.max(1))
+        };
         self.workers.submit(Job::Thumbs {
             clip_id: id,
-            // The proxy when there is one: it is 540p, so every seek and
-            // decode is a fraction of the cost of the same work on the
-            // original, and it holds frame-for-frame the same picture.
-            path: clip.playback_path().to_path_buf(),
+            path,
             duration_frames: clip.duration_frames,
             fps: self.project.fps(),
             tiles,
             still: clip.still,
+            pixels,
             cache_dir: crate::settings::thumb_cache_dir(),
         });
+    }
+
+    /// Whether a scrub sheet should hold off until the clip's proxy exists.
+    ///
+    /// True only while a proxy is genuinely plausible: proxies are on, there
+    /// is somewhere for them to live, and generation has not already failed.
+    /// Everything else builds from the original — bounded work, just more of
+    /// it.
+    fn sheet_should_wait_for_proxy(&self, id: ClipId) -> bool {
+        if !self.settings.proxies_enabled {
+            return false;
+        }
+        let Some(clip) = self.project.clip(id) else {
+            return false;
+        };
+        if clip.still || clip.proxy_path.as_ref().is_some_and(|p| p.is_file()) {
+            return false;
+        }
+        if matches!(self.proxy_state.get(&id), Some(ProxyState::Failed)) {
+            return false;
+        }
+        self.settings
+            .resolve_proxy_dir(self.project_path.as_deref())
+            .is_some()
+    }
+
+    /// Submit the sheet a clip was waiting on, now that its proxy question is
+    /// settled one way or the other.
+    fn flush_pending_sheet(&mut self, id: ClipId) {
+        if self.pending_sheets.remove(&id) {
+            self.sheet_requested.remove(&id);
+            self.request_scrub_sheet(id);
+        }
     }
 
     /// Ask for the clip's loudness envelope, if it has audio and has not been
@@ -3101,11 +3214,6 @@ impl eframe::App for RoughcutApp {
         // measured rather than reasoned about. Costs one `Instant::now` per
         // phase and prints nothing unless something was actually slow.
         let mut timings = Timings::default();
-        // A memory alarm from the gauge becomes a toast. Polling a mutex once
-        // a pass costs nothing; the gauge already woke the loop when it fired.
-        if let Some(alarm) = crate::gauge::take_alarm() {
-            self.set_status(alarm, StatusKind::Warn);
-        }
         self.handle_dropped_files(ctx);
         timings.mark("dropped");
         self.drain_workers(ctx);

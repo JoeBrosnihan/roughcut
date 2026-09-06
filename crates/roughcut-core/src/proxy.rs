@@ -24,6 +24,14 @@ pub fn proxy_path(proxy_dir: &Path, id: ClipId) -> PathBuf {
     proxy_dir.join(format!("{id}.mp4"))
 }
 
+/// Where a proxy is written while it is being transcoded and verified. Only a
+/// finished, checked proxy is renamed to [`proxy_path`], so a file at the
+/// final name is always complete — which is what lets a session adopt one by
+/// existence alone instead of re-probing the whole bin first.
+pub fn partial_path(proxy_dir: &Path, id: ClipId) -> PathBuf {
+    proxy_dir.join(format!("{id}.part.mp4"))
+}
+
 /// The exact command line from §10.
 pub fn proxy_args(source: &Path, dest: &Path) -> Vec<std::ffi::OsString> {
     vec![
@@ -132,13 +140,18 @@ pub fn generate(
         }
     }
 
+    // Transcode somewhere else and rename only once verified. Writing
+    // straight to `dest` meant a crash mid-transcode left a half-written file
+    // at the final name, and anything trusting the name would play garbage.
+    let part = partial_path(proxy_dir, clip.id);
+    let _ = std::fs::remove_file(&part);
     let output = crate::tools::run(
         "proxy",
-        background_command(ffmpeg).args(proxy_args(&clip.path, &dest)),
+        background_command(ffmpeg).args(proxy_args(&clip.path, &part)),
     )
     .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
     if !output.status.success() {
-        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(&part);
         bail!(
             "ffmpeg failed for {}: {}",
             clip.file_name(),
@@ -146,11 +159,19 @@ pub fn generate(
         );
     }
 
-    let proxy_info = probe(ffprobe, &dest)?;
+    let proxy_info = match probe(ffprobe, &part) {
+        Ok(info) => info,
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+    };
     if let Err(reject) = check_proxy(source_info, &proxy_info) {
-        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(&part);
         bail!("{}: {reject}", clip.file_name());
     }
+    std::fs::rename(&part, &dest)
+        .with_context(|| format!("cannot move the finished proxy to {}", dest.display()))?;
     Ok(dest)
 }
 

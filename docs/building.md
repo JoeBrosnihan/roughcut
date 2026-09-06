@@ -171,7 +171,7 @@ which binary and which config directory it is using.
 | `RUST_LOG` | Log filter. The bin target is `roughcut`, so use `roughcut=debug` |
 | `ROUGHCUT_REGEN_KEYS` | Rewrite `KEYS.md` from the key table when running its test |
 | `ROUGHCUT_KEEP_OUTPUT` | Keep the frame-accuracy test's working files instead of deleting them |
-| `ROUGHCUT_CHILD_RAM_WARN_MB` | Memory the background children may hold together before the window warns (default 8192) |
+| `ROUGHCUT_CHILD_RAM_BUDGET_MB` | Memory the background children may hold together before the pool pauses new speculative work (default 4096) |
 
 ## When the machine slows down
 
@@ -183,9 +183,12 @@ three things watch it:
 
 1. **Press `?`.** The overlay's `work:` line shows what is running right now
    and how much memory it holds together.
-2. **A toast fires on its own** when the children cross the budget above,
-   naming the worst offender — "background work is holding 9.1 GB (4
-   children; worst: sheet at 3.2 GB)".
+2. **The pool holds itself back** when the children cross the budget above:
+   no new speculative work (sheets, proxies, transcription) starts until
+   what is running has finished and usage has fallen under half the budget.
+   Work someone is waiting on — probes, rotations, waveforms, the audio bed
+   — is never held. There is nothing to act on; the `work:` line says when a
+   hold is on, and the log records it with the worst offender named.
 3. **The log** gets a line per expensive child (label, seconds, peak memory)
    and a per-label summary on exit, beside the seek-latency summary. Release
    builds write it via `ROUGHCUT_LOG_FILE`.

@@ -79,6 +79,14 @@ fn a_generated_proxy_maps_frame_for_frame() {
     let proxy_path = proxy::generate(&ffmpeg, &ffprobe, &clip, &info, &proxy_dir)
         .expect("proxy generation failed");
     assert!(proxy_path.exists());
+    // The final name is the adoption contract: a session that reopens a
+    // project trusts a file at this exact path to be a complete, verified
+    // proxy, so the transcode-in-progress name must be gone.
+    assert_eq!(proxy_path, proxy::proxy_path(&proxy_dir, clip.id));
+    assert!(
+        !proxy::partial_path(&proxy_dir, clip.id).exists(),
+        "the in-progress file should have been renamed away"
+    );
 
     let proxy_info = probe(&ffprobe, &proxy_path).unwrap();
     // The whole point: same count, same exact rational rate, smaller picture.
