@@ -7,6 +7,12 @@ get every clip in the bin, one at a time -- the real video, scrubbable and
 playable -- with two decisions to make about each: which stretches of it are
 good, and whether it belongs in the bin at all.
 
+Under that is what was said in the clip, from the transcripts whisper has
+already cached. Each line carries the frame it starts on, so tapping one
+seeks the video to it, and the line being spoken stays marked as it plays.
+Lines already inside a kept stretch are marked too, so a second pass can
+see what has been claimed without reading it off the bar.
+
 Both land straight in the .roughcut project file, which is what the window
 reads. Nothing leaves the machine.
 
@@ -169,6 +175,79 @@ def prepare(project, quiet=False):
 
 
 # ---------------------------------------------------------------------------
+# What was said, and when
+# ---------------------------------------------------------------------------
+
+CLI_CANDIDATES = [
+    Path(os.path.expandvars("%LOCALAPPDATA%")) / "Programs" / "Roughcut" / "roughcut-cli.exe",
+    Path(__file__).resolve().parent.parent / "target" / "release" / "roughcut-cli.exe",
+]
+_transcripts = {}          # clip id -> lines, so whisper is asked once
+
+
+def roughcut_cli():
+    for p in CLI_CANDIDATES:
+        if p.is_file():
+            return p
+    return None
+
+
+def lines_for(clip_id):
+    """The clip's transcript, grouped into tappable lines.
+
+    Whisper gives words, each carrying the frame it is spoken on, and a wall
+    of 217 separate words is not something to read or aim a thumb at. Lines
+    break where a sentence ends, and failing that where a breath does -- a
+    gap long enough to be a pause -- so a line is a thing somebody said
+    rather than an arbitrary ten words.
+    """
+    if clip_id in _transcripts:
+        return _transcripts[clip_id]
+
+    cli = roughcut_cli()
+    if cli is None:
+        return None
+    out = subprocess.run([str(cli), "transcript", "--project", str(PROJECT),
+                          "--clip", clip_id, "--words"],
+                         capture_output=True, text=True)
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        return None
+    if not data.get("transcribed"):
+        _transcripts[clip_id] = []
+        return []
+
+    words = data.get("word_list") or []
+    lines, cur = [], []
+    # Punctuation is what actually ends a thought. A pause only breaks a
+    # line when it is a long one and there is already a line's worth of
+    # words -- speech is full of half-second hesitations, and treating
+    # those as breaks chopped "the best piece of software / engineering /
+    # advice he ever gave me" into three lines.
+    GAP_MS = 1500
+    MIN_BEFORE_GAP = 5
+    MAX_WORDS = 16        # so a monologue without punctuation still breaks
+    for i, w in enumerate(words):
+        cur.append(w)
+        text = (w.get("text") or "").strip()
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        gap = (nxt.get("ms", 0) - w.get("ms", 0)) if nxt else 0
+        ends = text.endswith((".", "?", "!", "…"))
+        breathed = gap >= GAP_MS and len(cur) >= MIN_BEFORE_GAP
+        if nxt is None or ends or breathed or len(cur) >= MAX_WORDS:
+            lines.append({
+                "frame": cur[0].get("frame", 0),
+                "end": cur[-1].get("frame", 0),
+                "text": " ".join((c.get("text") or "").strip() for c in cur).strip(),
+            })
+            cur = []
+    lines = [l for l in lines if l["text"]]
+    _transcripts[clip_id] = lines
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # What the phone is given
 # ---------------------------------------------------------------------------
 
@@ -297,6 +376,28 @@ PAGE = r"""<!doctype html>
   .none { font-size:13px; color:var(--dim); background:var(--panel);
           border:1px dashed var(--line); padding:12px; text-align:center; }
 
+  /* What was said, under the decisions about it. Whisper gives words with
+     the frame each is spoken on, so a line is a seek target as well as
+     something to read -- which is most of why the transcript is worth
+     having on the phone at all. */
+  .script { margin-top:18px; }
+  .script h2 { font-size:11px; font-weight:600; letter-spacing:.08em;
+               text-transform:uppercase; color:var(--dim); margin:0 0 6px;
+               display:flex; gap:8px; align-items:baseline; }
+  .script h2 .count { color:var(--line); font-family:var(--mono); }
+  .script ol { list-style:none; margin:0; padding:0; }
+  .script li { display:flex; gap:10px; padding:9px 10px; cursor:pointer;
+               border-bottom:1px solid var(--line); align-items:baseline; }
+  .script li:active { background:var(--raised); }
+  .script li.now { background:#1c2128; box-shadow:inset 3px 0 0 var(--accent); }
+  .script li.kept { box-shadow:inset 3px 0 0 var(--keep); }
+  .script li.now.kept { box-shadow:inset 3px 0 0 var(--keep-lit); }
+  .script .at { flex:0 0 auto; font-family:var(--mono); font-size:12px;
+                font-variant-numeric:tabular-nums; color:var(--accent);
+                min-width:44px; }
+  .script li.kept .at { color:var(--keep-lit); }
+  .script .said { flex:1 1 auto; min-width:0; font-size:15px; }
+
   .status { margin:14px 12px 0; padding:9px 11px; font-size:12px; color:var(--dim);
             background:var(--panel); border:1px solid var(--line);
             border-left:3px solid var(--line); overflow-wrap:anywhere; }
@@ -343,6 +444,12 @@ PAGE = r"""<!doctype html>
       <button id="archive">Archive</button>
       <button id="next">Next ›</button>
     </div>
+
+    <section class="script">
+      <h2>Transcript <span class="count" id="scriptCount"></span></h2>
+      <ol id="script"></ol>
+      <div class="none" id="scriptNone">No transcript for this clip.</div>
+    </section>
 
     <section class="keeps">
       <h2 id="keepsTitle">Kept stretches</h2>
@@ -473,7 +580,8 @@ PAGE = r"""<!doctype html>
       drop.onclick = function (e) {
         e.stopPropagation();          // the row plays; the cross removes
         send("/drop", { clip: c.id, index: i }).then(function (r) {
-          c.hi = r.hi; render(); status("Dropped — written to the project.", "ok");
+          c.hi = r.hi; render(); paintScript();
+          status("Dropped — written to the project.", "ok");
         }).catch(function (e2) { status("Could not drop that: " + e2.message, "error"); });
       };
       li.appendChild(span); li.appendChild(of); li.appendChild(drop);
@@ -489,7 +597,85 @@ PAGE = r"""<!doctype html>
     at = Math.max(0, Math.min(S.clips.length - 1, i));
     sel = null;
     render();
+    loadScript();
     window.scrollTo({ top: 0 });
+  }
+
+  // --- transcript --------------------------------------------------------
+
+  var script = [], scriptFor = null, activeLine = -1;
+
+  function loadScript() {
+    var c = clip();
+    if (scriptFor === c.id) { paintScript(); return; }
+    scriptFor = c.id;
+    script = [];
+    activeLine = -1;
+    $("script").textContent = "";
+    $("scriptCount").textContent = "";
+    $("scriptNone").textContent = "Reading the transcript…";
+    $("scriptNone").hidden = false;
+    fetch("/transcript/" + c.id).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (scriptFor !== c.id) return;      // moved on while it loaded
+        script = d.lines || [];
+        $("scriptNone").textContent = d.available
+          ? "Nothing was said in this clip."
+          : "No transcript for this clip yet.";
+        paintScript();
+      })
+      .catch(function () {
+        if (scriptFor !== c.id) return;
+        $("scriptNone").textContent = "Could not read the transcript.";
+        $("scriptNone").hidden = false;
+      });
+  }
+
+  function inKept(frame) {
+    return clip().hi.some(function (h) { return frame >= h[0] && frame <= h[1]; });
+  }
+
+  function paintScript() {
+    var ol = $("script");
+    ol.textContent = "";
+    $("scriptNone").hidden = script.length > 0;
+    $("scriptCount").textContent = script.length ? script.length + " lines" : "";
+    script.forEach(function (line, i) {
+      var li = document.createElement("li");
+      li.dataset.i = i;
+      // A line already inside a kept stretch is marked, so a second pass
+      // can see what has been claimed without cross-checking the bar.
+      if (inKept(line.frame)) li.classList.add("kept");
+      var at_ = document.createElement("span");
+      at_.className = "at";
+      at_.textContent = mmss(line.frame);
+      var said = document.createElement("span");
+      said.className = "said";
+      said.textContent = line.text;
+      li.appendChild(at_); li.appendChild(said);
+      li.onclick = function () { v.currentTime = line.frame / FPS; v.play(); };
+      ol.appendChild(li);
+    });
+    followScript();
+  }
+
+  // Keep the spoken line under the playhead marked, so reading and watching
+  // stay in step without having to look between them.
+  function followScript() {
+    if (!script.length) return;
+    var f = frameNow(), found = -1;
+    for (var i = 0; i < script.length; i++) {
+      if (f >= script[i].frame) found = i; else break;
+    }
+    if (found === activeLine) return;
+    var ol = $("script");
+    if (activeLine >= 0 && ol.children[activeLine]) {
+      ol.children[activeLine].classList.remove("now");
+    }
+    activeLine = found;
+    if (found >= 0 && ol.children[found]) {
+      ol.children[found].classList.add("now");
+    }
   }
 
   $("clear").onclick = function () { sel = null; paintBar(); };
@@ -548,7 +734,7 @@ PAGE = r"""<!doctype html>
   $("keep").onclick = function () {
     var c = clip();
     send("/keep", { clip: c.id, in: sel[0], out: sel[1] }).then(function (r) {
-      c.hi = r.hi; sel = null; render();
+      c.hi = r.hi; sel = null; render(); paintScript();
       status("Kept — written to " + S.project + ".roughcut.", "ok");
     }).catch(function (e) { status("Could not save that: " + e.message, "error"); });
   };
@@ -564,8 +750,8 @@ PAGE = r"""<!doctype html>
 
   $("prev").onclick = function () { go(at - 1); };
   $("next").onclick = function () { go(at + 1); };
-  v.addEventListener("timeupdate", paintHead);
-  v.addEventListener("seeked", paintHead);
+  v.addEventListener("timeupdate", function () { paintHead(); followScript(); });
+  v.addEventListener("seeked", function () { paintHead(); followScript(); });
 
   fetch("/state").then(function (r) { return r.json(); }).then(function (s) {
     S = s; FPS = s.fps;
@@ -578,6 +764,7 @@ PAGE = r"""<!doctype html>
       rail.appendChild(b);
     });
     render();
+    loadScript();
     var missing = s.clips.filter(function (c) { return !c.ready; }).length;
     status(missing
       ? "Every decision is written straight into the project. " + missing + " clip(s) have no phone copy yet."
@@ -621,6 +808,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(PAGE.replace("__PROJECT__", PROJECT.stem))
         elif url.path == "/state":
             self._json(state())
+        elif url.path.startswith("/transcript/"):
+            lines = lines_for(unquote(url.path[len("/transcript/"):]))
+            if lines is None:
+                self._json({"lines": [], "available": False})
+            else:
+                self._json({"lines": lines, "available": True})
         elif url.path.startswith("/video/"):
             self.serve_file(unquote(url.path[7:]) + ".mp4", "video/mp4")
         elif url.path.startswith("/poster/"):
