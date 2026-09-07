@@ -105,6 +105,7 @@ mod tests {
             p.clips.push(SourceClip {
                 id: ClipId::new(),
                 still: false,
+                audio_only: false,
                 path: PathBuf::from(path),
                 proxy_path: None,
                 duration_frames: 300,

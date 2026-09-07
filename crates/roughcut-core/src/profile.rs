@@ -51,7 +51,11 @@ pub fn suggest<'a>(clips: impl IntoIterator<Item = &'a SourceClip>) -> Option<Pr
     // Photographs are excluded. A 12-megapixel 4:3 still is not evidence
     // about what shape the video should be, and it has no frame rate at all —
     // letting one vote would let a single holiday snap decide the export.
-    let all: Vec<&SourceClip> = clips.into_iter().collect();
+    // Sound is excluded outright, and unlike a photograph it is never the
+    // fallback either: a still at least has a shape, and an mp3 has nothing
+    // to offer but zeroes. A bin holding only music keeps the default
+    // profile until some picture arrives to set one.
+    let all: Vec<&SourceClip> = clips.into_iter().filter(|c| !c.audio_only).collect();
     let footage: Vec<&SourceClip> = all.iter().copied().filter(|c| !c.still).collect();
     // Unless photographs are all there is, in which case their shape is the
     // only information available.
@@ -278,6 +282,8 @@ mod tests {
             audio_index: 1,
             has_audio: true,
             still: false,
+            audio_only: false,
+            seconds: 0.0,
         }
     }
 

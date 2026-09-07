@@ -1409,6 +1409,13 @@ impl RoughcutApp {
     /// them, so a run of clips goes down in order rather than each one
     /// shoving the last further along.
     fn insert_clip_parts(&mut self, id: ClipId, at: i64) -> (usize, i64) {
+        if self.project.clip(id).is_some_and(|c| c.audio_only) {
+            self.set_status(
+                "that is sound — drag it onto an audio track",
+                StatusKind::Warn,
+            );
+            return (0, at);
+        }
         let ranges: Vec<(i64, i64)> = self
             .project
             .clip(id)
@@ -1477,6 +1484,13 @@ impl RoughcutApp {
     /// nothing is marked — the same range `V` would insert, so dragging and
     /// the keyboard cannot disagree about what a clip means.
     pub fn drop_clip_at(&mut self, clip_id: ClipId, frame: i64) {
+        if self.project.clip(clip_id).is_some_and(|c| c.audio_only) {
+            self.set_status(
+                "that is sound — drop it on an audio track, not the timeline",
+                StatusKind::Warn,
+            );
+            return;
+        }
         let Some((in_frame, out_frame)) =
             self.project.clip(clip_id).and_then(|c| c.marked_range())
         else {
@@ -3196,8 +3210,8 @@ impl RoughcutApp {
             return;
         };
         // A photograph has nothing to transcode: it is one frame, already
-        // decoded in a few milliseconds.
-        if clip.still {
+        // decoded in a few milliseconds. Sound has no picture to shrink.
+        if clip.still || clip.audio_only {
             return;
         }
         // Footage that has been set aside is not worth minutes of ffmpeg.
@@ -3325,6 +3339,11 @@ impl RoughcutApp {
         self.request_tiles(id, crate::workers::SCRUB_TILES);
     }
 
+    /// Sound has no frames to draw, so nothing that draws frames runs for it.
+    fn has_picture(&self, id: ClipId) -> bool {
+        self.project.clip(id).is_some_and(|c| !c.audio_only)
+    }
+
     fn request_tiles(&mut self, id: ClipId, tiles: usize) {
         let poster = tiles <= 1;
         let already = if poster {
@@ -3335,7 +3354,7 @@ impl RoughcutApp {
         if already {
             return;
         }
-        if !self.tools.has_ffmpeg() {
+        if !self.tools.has_ffmpeg() || !self.has_picture(id) {
             return;
         }
         // A sheet is a hundred-odd decodes for 96-pixel tiles, so it waits
@@ -3445,6 +3464,11 @@ impl RoughcutApp {
     /// yet. It runs on its own thread at the back of everything else.
     pub fn request_transcript(&mut self, id: ClipId) {
         if self.transcripts.contains_key(&id) || self.tools.whisper.is_none() {
+            return;
+        }
+        // Music is not speech, and whisper on a song produces confident
+        // nonsense that then turns up in a search for a word somebody said.
+        if self.project.clip(id).is_some_and(|c| c.audio_only) {
             return;
         }
         if !self.worth_preparing(id) {

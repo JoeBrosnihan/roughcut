@@ -43,6 +43,7 @@ fn clip(name: &str, frames: i64) -> SourceClip {
     SourceClip {
         id: ClipId::new(),
         still: false,
+        audio_only: false,
         path: PathBuf::from(format!("/media/{name}")),
         proxy_path: None,
         duration_frames: frames,

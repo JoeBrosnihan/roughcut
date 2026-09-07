@@ -401,6 +401,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let variable_rate = clip.variable_rate;
     let flagged = clip.flagged;
     let archived = clip.archived;
+    let audio_only = clip.audio_only;
     // Where the good stretches are, as fractions of the clip, so the strip
     // can be painted without keeping the clip borrowed.
     let last = clip.last_frame().max(1) as f32;
@@ -452,6 +453,27 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     }
     painter.rect_filled(thumb, CornerRadius::ZERO, theme::VIDEO_LETTERBOX);
 
+    // A sound file has no frames to show, so the tile says what it is
+    // instead of sitting there as an empty black rectangle waiting for a
+    // thumbnail that is never coming.
+    if audio_only {
+        let mid = thumb.center();
+        painter.text(
+            mid,
+            egui::Align2::CENTER_CENTER,
+            "\u{266A}",
+            egui::FontId::proportional(26.0),
+            fade(theme::WAVEFORM),
+        );
+        painter.text(
+            egui::pos2(mid.x, thumb.bottom() - 12.0),
+            egui::Align2::CENTER_CENTER,
+            "SOUND",
+            egui::FontId::proportional(9.0),
+            fade(theme::TEXT_DIM),
+        );
+    }
+
     // Hover-scrub: the pointer's horizontal position within the thumbnail
     // picks which of the filmstrip's tiles to show. The tiles were baked into
     // one texture when the clip was imported, so this costs a UV offset and
@@ -462,7 +484,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         .map(|p| ((p.x - thumb.left()) / thumb.width()).clamp(0.0, 1.0));
     // Pointing at a clip is the strongest possible statement about which sheet
     // is wanted next.
-    if hover_x.is_some() {
+    if hover_x.is_some() && !audio_only {
         app.request_scrub_sheet(id);
     }
     if let Some(t) = app.thumb(id) {

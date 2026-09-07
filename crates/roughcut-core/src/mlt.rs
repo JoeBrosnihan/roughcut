@@ -430,6 +430,7 @@ mod tests {
                 SourceClip {
                     id: a,
                     still: false,
+                    audio_only: false,
                     path: PathBuf::from(if cfg!(windows) {
                         r"C:\media\a.mp4"
                     } else {
@@ -460,6 +461,7 @@ mod tests {
                 SourceClip {
                     id: b,
                     still: false,
+                    audio_only: false,
                     path: PathBuf::from(if cfg!(windows) {
                         r"C:\media\b & c.mp4"
                     } else {

@@ -469,6 +469,7 @@ mod tests {
         project.clips.push(SourceClip {
             id,
             still: false,
+            audio_only: false,
             path: PathBuf::from(format!("/tmp/{id}.mp4")),
             proxy_path: None,
             duration_frames: frames,

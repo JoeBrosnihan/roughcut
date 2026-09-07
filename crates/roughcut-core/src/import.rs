@@ -56,6 +56,17 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
             false,
             seconds_to_frames(STILL_MAX_SECONDS, profile_fps),
         )
+    } else if info.audio_only {
+        // Sound has a real length but no frames to measure it in, so it is
+        // expressed in the project's, exactly as a photograph is. It can
+        // never be rate-mismatched: there is no rate to mismatch.
+        (
+            profile_fps,
+            false,
+            // Rounded, not truncated: a 3-minute-30.6-second track losing
+            // its last half second would end the bed early.
+            (info.seconds * profile_fps.as_f64()).round() as i64,
+        )
     } else {
         let native_fps = info.fps.reduced();
         let mismatch = native_fps != profile_fps;
@@ -87,8 +98,9 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         path,
         proxy_path: None,
         still: info.still,
+        audio_only: info.audio_only,
         duration_frames: duration_frames.max(1),
-        native_frames: if info.still {
+        native_frames: if info.still || info.audio_only {
             duration_frames.max(1)
         } else {
             info.native_frames.max(1)
@@ -221,6 +233,57 @@ fn absolutise(path: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// Sound is given a length in the project's own frames, and never gets
+    /// to decide what the project looks like.
+    #[test]
+    fn a_sound_file_takes_the_projects_rate_and_gives_it_no_shape() {
+        let mut p = Project::new();
+        // A 4K 30fps clip sets the project.
+        let video = info(3840, 2160, Rational::new(30, 1), 300);
+        assert!(matches!(
+            add_clip(&mut p, Path::new("/m/a.mp4"), &video),
+            ImportOutcome::Added(_)
+        ));
+        let shape = (p.profile.width, p.profile.height, p.profile.fps());
+
+        let mut music = info(0, 0, Rational::new(1, 1), 0);
+        music.audio_only = true;
+        music.has_audio = true;
+        music.video_index = -1;
+        music.seconds = 95.4;
+        let ImportOutcome::Added(id) = add_clip(&mut p, Path::new("/m/bed.mp3"), &music) else {
+            panic!("an mp3 should import");
+        };
+
+        let clip = p.clip(id).expect("in the bin");
+        assert!(clip.audio_only);
+        // 95.4 seconds at the project's 30 fps, rounded rather than truncated.
+        assert_eq!(clip.duration_frames, 2862);
+        assert_eq!(clip.native_fps(), Rational::new(30, 1));
+        // There is no rate to disagree with, so it can never be mismatched.
+        assert!(!clip.rate_mismatch);
+
+        // And the project is exactly as the video left it.
+        assert_eq!((p.profile.width, p.profile.height, p.profile.fps()), shape);
+    }
+
+    /// A bin holding only music has nothing to take a format from.
+    #[test]
+    fn music_alone_leaves_the_profile_where_it_was() {
+        let mut p = Project::new();
+        let before = p.profile.clone();
+        let mut music = info(0, 0, Rational::new(1, 1), 0);
+        music.audio_only = true;
+        music.has_audio = true;
+        music.seconds = 60.0;
+        assert!(matches!(
+            add_clip(&mut p, Path::new("/m/only.mp3"), &music),
+            ImportOutcome::Added(_)
+        ));
+        assert_eq!(p.profile, before, "an mp3 set the project format");
+    }
+
     use super::*;
     use crate::time::Rational;
 
@@ -240,6 +303,8 @@ mod tests {
             audio_index: 1,
             has_audio: true,
             still: false,
+            audio_only: false,
+            seconds: 0.0,
         }
     }
 

@@ -53,6 +53,7 @@ fn a_generated_proxy_maps_frame_for_frame() {
     let clip = SourceClip {
         id: ClipId::new(),
         still: false,
+        audio_only: false,
         path: source.clone(),
         proxy_path: None,
         duration_frames: info.native_frames,

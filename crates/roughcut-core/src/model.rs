@@ -105,6 +105,11 @@ pub struct SourceClip {
     /// were supported, which is what the default is for.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub still: bool,
+    /// Sound with no picture: music, voiceover, an effect. It belongs on an
+    /// audio track, never on the timeline, and lends the project none of its
+    /// format — there is no picture in it to take a format from.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audio_only: bool,
     /// Absolute path to the ORIGINAL file. Never a proxy.
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,6 +412,7 @@ mod tests {
         SourceClip {
             id: ClipId::new(),
             still: false,
+            audio_only: false,
             path: PathBuf::from("/media/a.mp4"),
             proxy_path: None,
             duration_frames,

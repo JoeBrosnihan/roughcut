@@ -195,6 +195,8 @@ mod tests {
             audio_index: 1,
             has_audio: true,
             still: false,
+            audio_only: false,
+            seconds: 0.0,
         }
     }
 

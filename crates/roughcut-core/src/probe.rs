@@ -39,6 +39,13 @@ pub struct MediaInfo {
     /// `-1` when the file has no audio.
     pub audio_index: i32,
     pub has_audio: bool,
+    /// Sound with no picture. It has no rate, no shape and no colour to
+    /// lend the project, so every one of those fields is a placeholder here
+    /// and `seconds` is the only measurement that means anything.
+    pub audio_only: bool,
+    /// The file's real length in seconds, as ffprobe reports it. The one
+    /// durable measurement for a file with no frames to count.
+    pub seconds: f64,
     /// A photograph. It has a size but no duration and no real frame rate, so
     /// the two are supplied by the project rather than measured — see
     /// `import::add_clip`.
@@ -109,18 +116,51 @@ pub fn parse_still_or_clip(json: &Value, still: bool) -> Result<MediaInfo> {
     let video = streams
         .iter()
         .find(|s| s.get("codec_type").and_then(Value::as_str) == Some("video"))
-        // An attached cover image is a video stream but not footage.
+        // An attached cover image is a video stream but not footage. An MP3
+        // with album art is exactly this, and is a sound file, not a movie.
         .filter(|s| {
             s.get("disposition")
                 .and_then(|d| d.get("attached_pic"))
                 .and_then(Value::as_i64)
                 != Some(1)
-        })
-        .ok_or_else(|| anyhow!("no video stream — Roughcut does not handle audio-only files"))?;
+        });
 
     let audio = streams
         .iter()
         .find(|s| s.get("codec_type").and_then(Value::as_str) == Some("audio"));
+
+    let Some(video) = video else {
+        // Sound with no picture. Everything a frame would describe — rate,
+        // size, aspect, colour — is a placeholder, deliberately so: this
+        // file has none of it to give, and the project must never take its
+        // shape from something with no shape.
+        let audio = audio.ok_or_else(|| anyhow!("this file has neither video nor audio"))?;
+        let seconds = duration_seconds(audio, json)
+            .filter(|s| *s > 0.0)
+            .ok_or_else(|| anyhow!("cannot tell how long this audio is"))?;
+        return Ok(MediaInfo {
+            width: 0,
+            height: 0,
+            rotation: 0,
+            // Fiction, as it is for a still. The project supplies the rate
+            // when the clip is added; nothing reads this.
+            fps: Rational::new(1, 1),
+            // Zero means "not measured": there are no frames to count, and
+            // only the project knows the rate to express a length in.
+            native_frames: 0,
+            variable_rate: false,
+            sample_aspect_num: 1,
+            sample_aspect_den: 1,
+            progressive: true,
+            colorspace: 709,
+            video_index: -1,
+            audio_index: audio.get("index").and_then(Value::as_i64).unwrap_or(0) as i32,
+            has_audio: true,
+            still: false,
+            audio_only: true,
+            seconds,
+        });
+    };
 
     let coded_width = video
         .get("width")
@@ -221,6 +261,8 @@ pub fn parse_still_or_clip(json: &Value, still: bool) -> Result<MediaInfo> {
         audio_index,
         has_audio: audio.is_some(),
         still,
+        audio_only: false,
+        seconds: duration_seconds(video, json).unwrap_or(0.0),
     })
 }
 
@@ -366,6 +408,61 @@ fn map_colorspace(s: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A sound file is measurable, and offers nothing about picture.
+    #[test]
+    fn an_audio_only_file_is_measured_by_its_length_alone() {
+        let json = json!({
+            "streams": [{
+                "index": 0,
+                "codec_type": "audio",
+                "duration": "95.400000"
+            }],
+            "format": { "duration": "95.400000" }
+        });
+        let info = parse_probe_json(&json).expect("an mp3 is importable");
+        assert!(info.audio_only);
+        assert!(info.has_audio);
+        assert_eq!(info.audio_index, 0);
+        // No picture, and nothing that could be mistaken for one.
+        assert_eq!((info.width, info.height), (0, 0));
+        assert_eq!(info.video_index, -1);
+        assert!(!info.still);
+        // The one real measurement.
+        assert!((info.seconds - 95.4).abs() < 0.001, "{}", info.seconds);
+        // Frames are not measured: only the project knows the rate.
+        assert_eq!(info.native_frames, 0);
+    }
+
+    /// An MP3 with album art is a sound file, not a one-frame movie.
+    #[test]
+    fn cover_art_does_not_make_a_song_into_footage() {
+        let json = json!({
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "width": 600,
+                    "height": 600,
+                    "disposition": { "attached_pic": 1 }
+                },
+                { "index": 1, "codec_type": "audio", "duration": "10.0" }
+            ],
+            "format": { "duration": "10.0" }
+        });
+        let info = parse_probe_json(&json).expect("still importable");
+        assert!(info.audio_only, "the cover art was treated as video");
+        assert_eq!((info.width, info.height), (0, 0));
+    }
+
+    /// A file with neither is not media, and says so rather than importing
+    /// as something with no length.
+    #[test]
+    fn a_file_with_no_streams_worth_having_is_refused() {
+        let json = json!({ "streams": [{ "index": 0, "codec_type": "subtitle" }] });
+        assert!(parse_probe_json(&json).is_err());
+    }
+
     use super::*;
     use serde_json::json;
 

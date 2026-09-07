@@ -277,6 +277,12 @@ pub const MEDIA_EXTENSIONS: &[&str] = &[
     "mpeg", "vob", "3gp", "braw", "r3d", "dv", "ogv",
 ];
 
+/// Sound with no picture: music, voiceover, an effect. It goes on an audio
+/// track rather than the timeline, and lends the project none of its shape —
+/// an MP3 has no frame rate, resolution or aspect to offer.
+pub const AUDIO_EXTENSIONS: &[&str] =
+    &["mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "opus", "aiff", "aif", "wma"];
+
 /// Photographs, which a trip or an event produces alongside the video and
 /// which belong in the same cut.
 ///
@@ -297,8 +303,13 @@ pub fn is_still_image(path: &Path) -> bool {
     has_extension(path, STILL_EXTENSIONS)
 }
 
+/// Sound with no picture of its own.
+pub fn is_audio_file(path: &Path) -> bool {
+    has_extension(path, AUDIO_EXTENSIONS)
+}
+
 pub fn is_media_file(path: &Path) -> bool {
-    has_extension(path, MEDIA_EXTENSIONS) || is_still_image(path)
+    has_extension(path, MEDIA_EXTENSIONS) || is_still_image(path) || is_audio_file(path)
 }
 
 /// Expand a dropped path into importable files. Folders recurse exactly one
@@ -409,6 +420,17 @@ mod ledger_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_files_are_media_and_are_known_to_be_sound() {
+        assert!(is_media_file(Path::new("/m/bed.mp3")));
+        assert!(is_media_file(Path::new("/m/Voice.WAV")));
+        assert!(is_audio_file(Path::new("/m/bed.mp3")));
+        // And are not confused with the other two kinds.
+        assert!(!is_still_image(Path::new("/m/bed.mp3")));
+        assert!(!is_audio_file(Path::new("/m/a.mp4")));
+        assert!(!is_audio_file(Path::new("/m/a.jpg")));
+    }
 
     #[test]
     fn media_extensions_are_case_insensitive() {

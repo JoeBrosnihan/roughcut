@@ -553,6 +553,7 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                     let stub = roughcut_core::model::SourceClip {
                         id: clip_id,
                         still: false,
+                        audio_only: false,
                         path: source,
                         proxy_path: None,
                         duration_frames: info.native_frames,

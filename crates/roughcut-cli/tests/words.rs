@@ -64,6 +64,7 @@ fn bin_clip(path: &Path) -> SourceClip {
     SourceClip {
         id: ClipId::new(),
         still: false,
+        audio_only: false,
         path: path.to_path_buf(),
         proxy_path: None,
         duration_frames: 1800,
