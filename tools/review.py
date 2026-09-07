@@ -606,6 +606,16 @@ PAGE = r"""<!doctype html>
     render();
     loadScript();
     window.scrollTo({ top: 0 });
+    // Moving to a clip is a request to watch it. This runs inside the tap
+    // that asked for it, which is the only reason a phone will start it
+    // with the sound on; a refusal is not worth reporting, since the
+    // controls are right there. Deliberately not in render(): the first
+    // load is not a gesture, and a page that starts talking on open is a
+    // different thing entirely.
+    if (clip().ready) {
+      var started = v.play();
+      if (started && started.catch) started.catch(function () {});
+    }
   }
 
   // --- transcript --------------------------------------------------------
