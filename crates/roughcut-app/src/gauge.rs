@@ -428,7 +428,14 @@ mod tests {
             "the sampler saw its memory: {} bytes",
             stat.worst_bytes
         );
-        assert!(st.live.is_empty(), "nothing is left on the live table");
+        // This child, specifically — not the whole table. The gauge is
+        // process-wide and the suite runs in parallel, so another test's
+        // ffmpeg can legitimately be alive in here at this moment; asserting
+        // the table was empty made a passing suite depend on scheduling.
+        assert!(
+            !st.live.iter().any(|l| l.label == "gauge-test"),
+            "the child was left on the live table after it finished"
+        );
     }
 
     /// The FFI path, proven against the one process guaranteed to exist.

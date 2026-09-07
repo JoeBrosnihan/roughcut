@@ -183,10 +183,36 @@ pub struct RenderState {
     pub out: PathBuf,
     pub total: i64,
     pub frame: i64,
+    /// When melt was started, so the rate can be measured against it.
+    started: std::time::Instant,
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
     rx: crossbeam_channel::Receiver<RenderMsg>,
     /// The MLT handed to melt, removed once it is finished with.
     scratch: PathBuf,
+}
+
+impl RenderState {
+    /// How much longer, if there is enough to go on yet.
+    ///
+    /// Measured over the whole render rather than the last few frames: melt's
+    /// rate swings with what it is encoding — a locked-off shot and a
+    /// handheld pan are not the same work — and an estimate that jumped
+    /// around with it would be worse than none. The average settles quickly
+    /// and then stays put.
+    ///
+    /// `None` until enough frames have gone by to divide by, so the first
+    /// number shown is never wild.
+    pub fn remaining(&self) -> Option<std::time::Duration> {
+        const ENOUGH: i64 = 24;
+        if self.frame < ENOUGH || self.frame >= self.total {
+            return None;
+        }
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let per_frame = elapsed / self.frame as f64;
+        let left = (self.total - self.frame) as f64 * per_frame;
+        (left.is_finite() && left >= 0.0)
+            .then(|| std::time::Duration::from_secs_f64(left.min(60.0 * 60.0 * 24.0)))
+    }
 }
 
 enum RenderMsg {
@@ -712,6 +738,7 @@ impl RoughcutApp {
         self.playhead = 0;
         self.missing_media = project_io::missing_media(&self.project);
         self.adopt_existing_proxies();
+        self.sync_audio_bed();
         self.set_status(
             if had_path {
                 "recovered — still unsaved, press Ctrl+S"
@@ -2135,6 +2162,9 @@ impl RoughcutApp {
     }
 
     fn after_history_change(&mut self) {
+        // Undo and redo both change what is on the audio tracks, so the bed
+        // has to follow. Free when nothing about the sound moved.
+        self.sync_audio_bed();
         self.dirty = true;
         // Undo and redo bypass `edit`, so they arm the autosave themselves.
         self.autosave_pending = true;
@@ -2544,6 +2574,7 @@ impl RoughcutApp {
 
         self.project = Project::new();
         self.history.clear();
+        self.sync_audio_bed();
         self.project_path = None;
         self.dirty = false;
         self.selected_clip = None;
@@ -2653,6 +2684,10 @@ impl RoughcutApp {
                 self.missing_media = project_io::missing_media(&self.project);
                 self.adopt_existing_proxies();
                 self.revalidate_clips();
+                // A project arriving with sound already on it needs its bed
+                // built now — nothing else is going to ask for it, and the
+                // lane would draw a piece that plays nothing.
+                self.sync_audio_bed();
                 if let Some(dir) = path.parent() {
                     self.settings.last_project_dir = Some(dir.to_path_buf());
                 }
@@ -2840,6 +2875,7 @@ impl RoughcutApp {
             out: out.to_path_buf(),
             total,
             frame: 0,
+            started: std::time::Instant::now(),
             cancel,
             rx,
             scratch,

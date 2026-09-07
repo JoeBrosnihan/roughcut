@@ -167,6 +167,27 @@ fn even(n: u32) -> u32 {
     n + (n & 1)
 }
 
+/// How long is left, said the way somebody waiting would say it.
+///
+/// Rounded coarsely on purpose: an estimate good to the second claims a
+/// precision it does not have, and watching it tick down one second at a
+/// time is worse than being told roughly and left alone.
+fn human_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0..=9 => "a few seconds".to_string(),
+        10..=89 => format!("{} seconds", (secs + 5) / 10 * 10),
+        90..=5399 => {
+            let mins = (secs as f64 / 60.0).round() as u64;
+            format!("{mins} minute{}", if mins == 1 { "" } else { "s" })
+        }
+        _ => {
+            let hours = secs as f64 / 3600.0;
+            format!("{hours:.1} hours")
+        }
+    }
+}
+
 /// While melt encodes. Modal on purpose: the cut must not change underneath a
 /// render that is reading it.
 fn rendering(app: &mut RoughcutApp, ctx: &egui::Context) {
@@ -176,6 +197,7 @@ fn rendering(app: &mut RoughcutApp, ctx: &egui::Context) {
     let (frame, total, out) = (state.frame, state.total.max(1), state.out.clone());
     let done = (frame as f32 / total as f32).clamp(0.0, 1.0);
     let cancelling = state.cancel.load(std::sync::atomic::Ordering::Relaxed);
+    let remaining = state.remaining().map(human_duration);
     let mut stop = false;
 
     egui::Modal::new(egui::Id::new("rendering")).show(ctx, |ui| {
@@ -193,6 +215,10 @@ fn rendering(app: &mut RoughcutApp, ctx: &egui::Context) {
         ui.label(
             egui::RichText::new(if cancelling {
                 "stopping…".to_string()
+            } else if let Some(left) = remaining {
+                // The question in front of a render is "can I go and do
+                // something else", which a percentage does not answer.
+                format!("frame {frame} of {total} · about {left} left")
             } else {
                 format!("frame {frame} of {total}")
             })
