@@ -1396,7 +1396,8 @@ impl RoughcutApp {
             self.set_status("that clip has no usable range", StatusKind::Warn);
             return;
         };
-        let to = frame + (out_frame - in_frame);
+        // Half-open: one past the last frame it would occupy.
+        let to = frame + (out_frame - in_frame + 1);
         let free = self
             .project
             .audio
@@ -1637,6 +1638,21 @@ impl RoughcutApp {
 
     fn split(&mut self) {
         let at = self.playhead;
+        // A selected piece of sound is what the key means, exactly as it is
+        // for Delete. Otherwise it is the cut under the playhead, as before.
+        if let Some((track, _)) = self.selected_audio {
+            let mut second = None;
+            let ok = self.edit(|p| {
+                second = p.audio.get_mut(track).and_then(|t| t.split_at(at));
+                second.is_some()
+            });
+            if ok {
+                // Land on the half after the playhead: the same half the
+                // playhead is now sitting at the start of.
+                self.selected_audio = second.map(|i| (track, i));
+                return;
+            }
+        }
         if self.edit(|p| timeline::split_at(p, at)) {
             self.selected_item = None;
         }

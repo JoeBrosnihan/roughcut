@@ -122,7 +122,7 @@ pub const KEY_MAP: &[Section] = &[
             Binding { keys: "Ctrl+C", description: "Copy the clip under the playhead", scope: Scope::Timeline },
             Binding { keys: "Ctrl+X", description: "Cut it: copy, then close the gap", scope: Scope::Timeline },
             Binding { keys: "Ctrl+V", description: "Paste at the playhead, rippling the rest", scope: Scope::Timeline },
-            Binding { keys: "S", description: "Split at the playhead", scope: Scope::Timeline },
+            Binding { keys: "S", description: "Split at the playhead — the selected sound, or the cut under it", scope: Scope::Timeline },
             Binding { keys: "X  or  Delete", description: "Ripple delete, closing the gap", scope: Scope::Timeline },
             Binding { keys: "[", description: "Trim the head of the clip to the playhead", scope: Scope::Timeline },
             Binding { keys: "]", description: "Trim the tail of the clip to the playhead", scope: Scope::Timeline },

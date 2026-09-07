@@ -327,33 +327,34 @@ impl Monitor {
         let Some(count) = player.get_i64("track-list/count") else {
             return;
         };
-        let (mut clip, mut bed) = (None, None);
+        let (mut clip, mut bed, mut video) = (None, None, None);
         for n in 0..count {
-            if player.get_string(&format!("track-list/{n}/type")).as_deref() != Some("audio") {
+            let Some(kind) = player.get_string(&format!("track-list/{n}/type")) else {
                 continue;
-            }
+            };
             let Some(id) = player.get_i64(&format!("track-list/{n}/id")) else {
                 continue;
             };
-            if player
-                .get_flag(&format!("track-list/{n}/external"))
-                .unwrap_or(false)
-            {
-                bed.get_or_insert(id);
-            } else {
-                clip.get_or_insert(id);
+            match kind.as_str() {
+                "video" => {
+                    video.get_or_insert(id);
+                }
+                "audio" => {
+                    if player
+                        .get_flag(&format!("track-list/{n}/external"))
+                        .unwrap_or(false)
+                    {
+                        bed.get_or_insert(id);
+                    } else {
+                        clip.get_or_insert(id);
+                    }
+                }
+                _ => {}
             }
         }
 
-        let graph = match (clip, bed) {
-            (Some(c), Some(b)) => {
-                // `normalize=0`, or adding a music track would halve the
-                // volume of everything that was already there.
-                format!("[aid{c}] [aid{b}] amix=inputs=2:normalize=0 [ao]")
-            }
-            // A clip with no sound of its own: the bed is all there is.
-            (None, Some(b)) => format!("[aid{b}] anull [ao]"),
-            _ => return,
+        let Some(graph) = bed_graph(video, clip, bed) else {
+            return;
         };
         if let Err(e) = player.set_property_string("lavfi-complex", &graph) {
             log::warn!("cannot mix the audio bed: {e}");
@@ -681,9 +682,65 @@ impl Monitor {
     }
 }
 
+/// The `lavfi-complex` graph that mixes a bed into what is playing.
+///
+/// `lavfi-complex` replaces mpv's routing rather than adding to it, so every
+/// output that should still exist has to be named. A graph mentioning only
+/// sound tells mpv this player has no video, and the preview goes black for
+/// as long as anything sits on an audio track — which is exactly what it did.
+///
+/// `None` when there is no bed to mix, in which case the caller clears the
+/// property rather than setting it.
+fn bed_graph(video: Option<i64>, clip: Option<i64>, bed: Option<i64>) -> Option<String> {
+    let sound = match (clip, bed) {
+        (Some(c), Some(b)) => {
+            // `normalize=0`, or adding a music track would halve the volume
+            // of everything that was already there.
+            format!("[aid{c}] [aid{b}] amix=inputs=2:normalize=0 [ao]")
+        }
+        // A clip with no sound of its own: the bed is all there is.
+        (None, Some(b)) => format!("[aid{b}] anull [ao]"),
+        _ => return None,
+    };
+    Some(match video {
+        Some(v) => format!("[vid{v}] copy [vo]; {sound}"),
+        None => sound,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preview must survive having a bed mixed into it.
+    ///
+    /// This is the whole of the bug: the graph named `[ao]` and nothing
+    /// else, so mpv dropped the video track and the picture went black the
+    /// moment anything was put on an audio track.
+    #[test]
+    fn mixing_a_bed_keeps_the_picture() {
+        // A clip with its own sound, plus the bed.
+        let g = bed_graph(Some(1), Some(2), Some(3)).expect("a bed to mix");
+        assert!(g.contains("[vo]"), "the video output was dropped: {g}");
+        assert!(g.contains("[vid1]"), "the video track is not in the graph: {g}");
+        assert!(g.contains("amix=inputs=2"), "{g}");
+        assert!(g.contains("normalize=0"), "mixing would halve the volume: {g}");
+
+        // A silent clip: the bed is all the sound there is, picture kept.
+        let g = bed_graph(Some(1), None, Some(3)).expect("a bed to mix");
+        assert!(g.contains("[vo]"), "{g}");
+        assert!(g.contains("[aid3] anull [ao]"), "{g}");
+
+        // Sound with no picture: nothing to keep, and nothing that would
+        // name a video output which does not exist.
+        let g = bed_graph(None, Some(2), Some(3)).expect("a bed to mix");
+        assert!(!g.contains("[vo]"), "named a video output with no video: {g}");
+        assert!(g.contains("[ao]"), "{g}");
+
+        // No bed: no graph to set, and the caller clears instead.
+        assert_eq!(bed_graph(Some(1), Some(2), None), None);
+        assert_eq!(bed_graph(Some(1), None, None), None);
+    }
 
     #[test]
     fn shuttle_speeds_cycle_and_wrap() {

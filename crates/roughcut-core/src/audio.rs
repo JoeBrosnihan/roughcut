@@ -87,7 +87,10 @@ impl AudioTrack {
         self.items.iter().position(|i| i.covers(frame))
     }
 
-    /// Whether `[from, to]` is clear of everything already on this track.
+    /// Whether `[from, to)` is clear of everything already on this track.
+    ///
+    /// Half-open, like `overlaps` and `end` — two pieces that meet exactly
+    /// do not overlap, and a lane holding one is still room for the other.
     ///
     /// `place` overwrites what it lands on, which is right when somebody
     /// aimed at a lane, and wrong when nobody did -- so dropping sound on
@@ -143,6 +146,35 @@ impl AudioTrack {
     }
 
     /// Take an item off the track, leaving silence where it was.
+    /// Cut the piece under `frame` in two at that point.
+    ///
+    /// Changes nothing about what the track plays -- only where its
+    /// boundaries are -- so the halves can then be moved, trimmed or deleted
+    /// separately. A frame already on a boundary, or in a gap, is a no-op:
+    /// there is nothing there to divide.
+    ///
+    /// Returns the index of the second half.
+    pub fn split_at(&mut self, frame: i64) -> Option<usize> {
+        let index = self.item_at(frame)?;
+        let existing = self.items[index];
+        let offset = frame - existing.start;
+        if offset <= 0 {
+            return None;
+        }
+        self.items[index] = AudioItem {
+            out_frame: existing.in_frame + offset - 1,
+            ..existing
+        };
+        let second = AudioItem {
+            clip_id: existing.clip_id,
+            in_frame: existing.in_frame + offset,
+            out_frame: existing.out_frame,
+            start: frame,
+        };
+        self.items.insert(index + 1, second);
+        Some(index + 1)
+    }
+
     pub fn remove(&mut self, index: usize) -> Option<AudioItem> {
         (index < self.items.len()).then(|| self.items.remove(index))
     }
@@ -242,6 +274,33 @@ pub fn mix_args(pieces: &[MixPiece], dest: &std::path::Path) -> Option<Vec<std::
 
 #[cfg(test)]
 mod tests {
+
+    /// Splitting sound divides it without changing a note of what plays.
+    #[test]
+    fn splitting_a_piece_leaves_the_same_sound_in_two_halves() {
+        let mut t = AudioTrack::new("A1");
+        let c = ClipId::new();
+        // Source frames 500..699 laid down at timeline frame 100.
+        t.place(AudioItem { clip_id: c, in_frame: 500, out_frame: 699, start: 100 });
+
+        let second = t.split_at(150).expect("a piece was there to split");
+        assert_eq!(second, 1);
+        assert_eq!(t.items().len(), 2);
+
+        let (a, b) = (t.items()[0], t.items()[1]);
+        // The halves meet exactly, on the timeline and in the source.
+        assert_eq!((a.start, a.in_frame, a.out_frame), (100, 500, 549));
+        assert_eq!((b.start, b.in_frame, b.out_frame), (150, 550, 699));
+        assert_eq!(a.len() + b.len(), 200, "the sound changed length");
+        assert_eq!(a.end(), b.start, "a gap opened between the halves");
+
+        // Splitting on a boundary or in a gap divides nothing.
+        assert_eq!(t.split_at(100), None, "already a boundary");
+        assert_eq!(t.split_at(150), None, "already a boundary");
+        assert_eq!(t.split_at(5000), None, "nothing there");
+        assert_eq!(t.items().len(), 2);
+    }
+
 
     /// What "is this lane free here?" has to answer for layering to work.
     #[test]
