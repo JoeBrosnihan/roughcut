@@ -246,6 +246,8 @@ mod tests {
             rate_mismatch: false,
             variable_rate: false,
             flagged: true,
+            highlights: Vec::new(),
+            archived: false,
         });
         p
     }

@@ -73,6 +73,8 @@ fn a_generated_proxy_maps_frame_for_frame() {
         rate_mismatch: false,
         variable_rate: false,
         flagged: false,
+        highlights: Vec::new(),
+        archived: false,
     };
 
     let proxy_dir = dir.join("proxies");

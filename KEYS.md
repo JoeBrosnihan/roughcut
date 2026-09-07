@@ -29,6 +29,7 @@ act on whichever region currently has focus; press `Tab` to switch.
 | `Shift+I` | Clear in | Source |
 | `Shift+O` | Clear out | Source |
 | `Shift+X` | Clear both | Source |
+| `G` | Keep the marked range as good material — press again inside one to drop it | Source |
 
 ## Assembly
 

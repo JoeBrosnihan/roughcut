@@ -159,6 +159,46 @@ pub struct SourceClip {
     /// wrong place to park that judgement.
     #[serde(default)]
     pub flagged: bool,
+    /// The good parts of this clip, in order and never overlapping.
+    ///
+    /// `flagged` at the granularity that actually matters: a twenty-minute
+    /// take is rarely good or bad as a whole, and the judgement worth keeping
+    /// is *which stretches* of it are worth using. Marks cannot hold this —
+    /// there is one pair of them, so noting a second good stretch destroys
+    /// the first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<Highlight>,
+    /// Set aside without being thrown away.
+    ///
+    /// Rejecting footage is most of a first pass, and it has to be as cheap
+    /// as keeping it — but "cheap" cannot mean "irreversible", because a
+    /// clip dismissed in the first ten minutes is exactly the one wanted in
+    /// the last. An archived clip keeps its marks, its highlights and its
+    /// place; it is only hidden, and no background work is spent on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+}
+
+/// A stretch of a clip worth using. Inclusive at both ends, like every other
+/// range in the application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Highlight {
+    pub in_frame: i64,
+    pub out_frame: i64,
+}
+
+impl Highlight {
+    pub fn len(&self) -> i64 {
+        inclusive_len(self.in_frame, self.out_frame)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() <= 0
+    }
+
+    pub fn contains(&self, frame: i64) -> bool {
+        frame >= self.in_frame && frame <= self.out_frame
+    }
 }
 
 fn minus_one() -> i32 {
@@ -203,6 +243,60 @@ impl SourceClip {
             Some(p) if p.exists() => p.as_path(),
             _ => self.path.as_path(),
         }
+    }
+
+    /// The highlight covering `frame`, if any.
+    pub fn highlight_at(&self, frame: i64) -> Option<usize> {
+        self.highlights.iter().position(|h| h.contains(frame))
+    }
+
+    /// Frames of this clip marked as worth using.
+    pub fn highlighted_frames(&self) -> i64 {
+        self.highlights.iter().map(|h| h.len()).sum()
+    }
+
+    /// Record a stretch as worth using.
+    ///
+    /// Overlapping and abutting stretches are merged rather than stacked, so
+    /// the list stays sorted and disjoint however it was built up. Without
+    /// that, re-keeping a range you had already kept would leave two entries
+    /// covering the same frames, and "the highlight under the playhead"
+    /// would stop being a single answer.
+    ///
+    /// Returns false if the range is empty or lies outside the clip.
+    pub fn keep(&mut self, in_frame: i64, out_frame: i64) -> bool {
+        if self.duration_frames <= 0 {
+            return false;
+        }
+        let last = self.last_frame();
+        let mut a = in_frame.min(out_frame).clamp(0, last);
+        let mut b = in_frame.max(out_frame).clamp(0, last);
+        if b < a {
+            return false;
+        }
+        // Abutting counts as overlapping: two stretches that touch are one
+        // stretch, and leaving a zero-frame seam between them would show as
+        // a hairline gap on the strip that no amount of scrubbing could
+        // close.
+        let mut merged = Vec::with_capacity(self.highlights.len() + 1);
+        for h in self.highlights.drain(..) {
+            if h.out_frame + 1 < a || h.in_frame > b + 1 {
+                merged.push(h);
+            } else {
+                a = a.min(h.in_frame);
+                b = b.max(h.out_frame);
+            }
+        }
+        merged.push(Highlight { in_frame: a, out_frame: b });
+        merged.sort_by_key(|h| h.in_frame);
+        self.highlights = merged;
+        true
+    }
+
+    /// Forget the highlight covering `frame`. Returns what was removed.
+    pub fn unkeep_at(&mut self, frame: i64) -> Option<Highlight> {
+        let at = self.highlight_at(frame)?;
+        Some(self.highlights.remove(at))
     }
 
     /// Resolved marks, applying the §9 defaults (missing in = 0,
@@ -303,4 +397,134 @@ impl Project {
         self.clips.len() != before
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(duration_frames: i64) -> SourceClip {
+        SourceClip {
+            id: ClipId::new(),
+            still: false,
+            path: PathBuf::from("/media/a.mp4"),
+            proxy_path: None,
+            duration_frames,
+            native_frames: duration_frames,
+            native_fps_num: 30,
+            native_fps_den: 1,
+            width: 1920,
+            height: 1080,
+            sample_aspect_num: 1,
+            sample_aspect_den: 1,
+            progressive: true,
+            colorspace: 709,
+            has_audio: true,
+            video_index: 0,
+            audio_index: 1,
+            mark_in: None,
+            mark_out: None,
+            rate_mismatch: false,
+            variable_rate: false,
+            flagged: false,
+            highlights: Vec::new(),
+            archived: false,
+        }
+    }
+
+    fn spans(c: &SourceClip) -> Vec<(i64, i64)> {
+        c.highlights.iter().map(|h| (h.in_frame, h.out_frame)).collect()
+    }
+
+    #[test]
+    fn kept_stretches_stay_sorted_however_they_are_added() {
+        let mut c = clip(1000);
+        assert!(c.keep(500, 600));
+        assert!(c.keep(100, 200));
+        assert!(c.keep(800, 900));
+        assert_eq!(spans(&c), [(100, 200), (500, 600), (800, 900)]);
+        assert_eq!(c.highlighted_frames(), 303);
+    }
+
+    /// Keeping the same stretch twice must leave one entry, not two — the
+    /// whole list is addressed by "which one covers this frame", and two
+    /// answers to that is no answer.
+    #[test]
+    fn overlapping_stretches_merge_into_one() {
+        let mut c = clip(1000);
+        c.keep(100, 200);
+        c.keep(150, 300);
+        assert_eq!(spans(&c), [(100, 300)]);
+
+        // Re-keeping ground already covered changes nothing at all.
+        c.keep(120, 180);
+        assert_eq!(spans(&c), [(100, 300)]);
+
+        // A stretch that bridges two others swallows both.
+        c.keep(600, 700);
+        c.keep(250, 650);
+        assert_eq!(spans(&c), [(100, 700)]);
+    }
+
+    /// Frame 200 and frame 201 are adjacent; a seam between them is invisible
+    /// on screen but real to every lookup, so touching stretches merge too.
+    #[test]
+    fn abutting_stretches_merge_rather_than_leaving_a_seam() {
+        let mut c = clip(1000);
+        c.keep(100, 200);
+        c.keep(201, 300);
+        assert_eq!(spans(&c), [(100, 300)]);
+
+        // One frame further apart is a genuine gap and stays one.
+        let mut d = clip(1000);
+        d.keep(100, 200);
+        d.keep(202, 300);
+        assert_eq!(spans(&d), [(100, 200), (202, 300)]);
+    }
+
+    #[test]
+    fn a_stretch_is_found_and_forgotten_by_the_frame_inside_it() {
+        let mut c = clip(1000);
+        c.keep(100, 200);
+        c.keep(500, 600);
+        assert_eq!(c.highlight_at(150), Some(0));
+        assert_eq!(c.highlight_at(550), Some(1));
+        assert_eq!(c.highlight_at(300), None);
+        // Inclusive at both ends, like every other range here.
+        assert_eq!(c.highlight_at(100), Some(0));
+        assert_eq!(c.highlight_at(200), Some(0));
+        assert_eq!(c.highlight_at(201), None);
+
+        assert_eq!(
+            c.unkeep_at(550),
+            Some(Highlight { in_frame: 500, out_frame: 600 })
+        );
+        assert_eq!(spans(&c), [(100, 200)]);
+        assert_eq!(c.unkeep_at(550), None, "already gone");
+    }
+
+    #[test]
+    fn a_stretch_is_clamped_to_the_clip_and_may_be_given_backwards() {
+        let mut c = clip(300);
+        // Given end-first, as a backwards drag produces.
+        assert!(c.keep(250, 50));
+        assert_eq!(spans(&c), [(50, 250)]);
+
+        // Past the end clamps rather than storing a position that does not
+        // exist in the file.
+        let mut d = clip(300);
+        assert!(d.keep(200, 99_999));
+        assert_eq!(spans(&d), [(200, 299)]);
+
+        // A single frame is a legal stretch.
+        let mut e = clip(300);
+        assert!(e.keep(42, 42));
+        assert_eq!(spans(&e), [(42, 42)]);
+        assert_eq!(e.highlighted_frames(), 1);
+
+        // A clip with no frames has nothing to keep.
+        let mut empty = clip(0);
+        assert!(!empty.keep(0, 10));
+        assert!(empty.highlights.is_empty());
+    }
 }

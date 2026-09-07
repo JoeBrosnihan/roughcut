@@ -34,7 +34,7 @@ pub mod transcript;
 pub mod waveform;
 pub mod whisper;
 
-pub use model::{ClipId, Profile, Project, SourceClip, TimelineItem, SCHEMA_VERSION};
+pub use model::{ClipId, Highlight, Profile, Project, SourceClip, TimelineItem, SCHEMA_VERSION};
 pub use time::Rational;
 pub use undo::History;
 

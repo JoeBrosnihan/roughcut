@@ -20,6 +20,8 @@ const GAP: f32 = 6.0;
 const TILE_W: f32 = 112.0;
 const THUMB_H: f32 = TILE_W * 9.0 / 16.0;
 const LABEL_H: f32 = 26.0;
+/// Height of the green strip showing where a clip's good stretches are.
+const KEEP_STRIP_H: f32 = 3.0;
 const TILE_H: f32 = THUMB_H + LABEL_H;
 /// Vertical distance from one row of tiles to the next.
 const ROW_PITCH: f32 = TILE_H + GAP;
@@ -47,7 +49,21 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
                     return;
                 }
 
-                let ids: Vec<ClipId> = app.project.clips.iter().map(|c| c.id).collect();
+                // Archived clips are hidden unless asked for. They are still
+                // in the project — this is a view, not a filter on what
+                // exists.
+                let show_archived = app.settings.show_archived;
+                let ids: Vec<ClipId> = app
+                    .project
+                    .clips
+                    .iter()
+                    .filter(|c| show_archived || !c.archived)
+                    .map(|c| c.id)
+                    .collect();
+                if ids.is_empty() {
+                    all_archived_state(app, ui);
+                    return;
+                }
 
                 // A wheel event is applied over several frames, and nothing in
                 // egui asks for the repaints that would finish the job. The
@@ -122,6 +138,7 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     let mut clear_recents = false;
     let mut toggle_proxies: Option<bool> = None;
     let mut toggle_ripple: Option<bool> = None;
+    let mut toggle_archived: Option<bool> = None;
     let mut add_audio = false;
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
@@ -183,6 +200,27 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
                     toggle_proxies = Some(proxies);
                 }
                 ui.separator();
+                // The way back to footage that has been set aside: to restore
+                // it, or to remove it for good. Archived clips draw faded and
+                // no background work is spent on them.
+                let archived_count = app.project.clips.iter().filter(|c| c.archived).count();
+                let mut show_archived = app.settings.show_archived;
+                ui.add_enabled_ui(archived_count > 0 || show_archived, |ui| {
+                    if ui
+                        .checkbox(
+                            &mut show_archived,
+                            format!("Show archived ({archived_count})"),
+                        )
+                        .on_hover_text(
+                            "Delete on a bin clip archives it rather than removing it. \
+                             Shown here faded, where Delete removes it for good.",
+                        )
+                        .changed()
+                    {
+                        toggle_archived = Some(show_archived);
+                    }
+                });
+                ui.separator();
                 // Always reachable, so a dismissed startup prompt is never the
                 // last word on a session's work.
                 ui.add_enabled_ui(app.has_recoverable_session(), |ui| {
@@ -196,8 +234,14 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
                 }
             });
 
+            let shown = app
+                .project
+                .clips
+                .iter()
+                .filter(|c| app.settings.show_archived || !c.archived)
+                .count();
             ui.label(
-                egui::RichText::new(format!("BIN ({})", app.project.clips.len()))
+                egui::RichText::new(format!("BIN ({shown})"))
                     .size(11.0)
                     .color(theme::TEXT_DIM),
             );
@@ -209,6 +253,9 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     }
     if let Some(on) = toggle_ripple {
         app.set_ripple_all_tracks(on);
+    }
+    if let Some(on) = toggle_archived {
+        app.set_show_archived(on);
     }
     if add_audio {
         app.add_audio_track();
@@ -321,6 +368,26 @@ fn empty_state(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Every clip in the bin has been set aside. Says so, and offers the way back
+/// rather than looking like an empty project.
+fn all_archived_state(app: &mut RoughcutApp, ui: &mut egui::Ui) {
+    let n = app.project.clips.len();
+    ui.add_space(16.0);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "{n} clip{} archived",
+                if n == 1 { "" } else { "s" }
+            ))
+            .color(theme::TEXT_DIM),
+        );
+        ui.add_space(6.0);
+        if ui.button("Show archived").clicked() {
+            app.set_show_archived(true);
+        }
+    });
+}
+
 fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let Some(clip) = app.project.clip(id) else {
         return;
@@ -332,6 +399,15 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let rate_mismatch = clip.rate_mismatch;
     let variable_rate = clip.variable_rate;
     let flagged = clip.flagged;
+    let archived = clip.archived;
+    // Where the good stretches are, as fractions of the clip, so the strip
+    // can be painted without keeping the clip borrowed.
+    let last = clip.last_frame().max(1) as f32;
+    let highlights: Vec<(f32, f32)> = clip
+        .highlights
+        .iter()
+        .map(|h| (h.in_frame as f32 / last, h.out_frame as f32 / last))
+        .collect();
     let missing = !clip.path.exists();
     let has_proxy = clip.proxy_path.as_ref().is_some_and(|p| p.exists());
     let marked = clip.mark_in.is_some() || clip.mark_out.is_some();
@@ -348,6 +424,15 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     );
     let thumb = Rect::from_min_size(rect.min, egui::vec2(rect.width(), THUMB_H));
     let painter = ui.painter_at(rect);
+    // An archived tile is drawn at half strength: present, legible, and
+    // obviously not part of the working bin.
+    let fade = |c: egui::Color32| {
+        if archived {
+            c.linear_multiply(0.45)
+        } else {
+            c
+        }
+    };
 
     if selected || response.hovered() {
         painter.rect_filled(
@@ -393,7 +478,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
             t.tex.id(),
             Rect::from_center_size(thumb.center(), size),
             t.uv(frame_tile),
-            egui::Color32::WHITE,
+            fade(egui::Color32::WHITE),
         );
     }
 
@@ -407,6 +492,35 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         );
     }
 
+    // The good stretches, as a strip along the foot of the picture.
+    //
+    // A count would say how many there are; this says *where* they are and
+    // how much of the clip they cover, which is the question being asked
+    // while skimming a bin for material. It is the same shape as the scrub
+    // bar directly below it, so the two read as one idea at two sizes.
+    if !highlights.is_empty() {
+        let strip = Rect::from_min_max(
+            egui::pos2(thumb.left(), thumb.bottom() - KEEP_STRIP_H),
+            thumb.right_bottom(),
+        );
+        painter.rect_filled(strip, CornerRadius::ZERO, egui::Color32::from_black_alpha(150));
+        for (a, b) in &highlights {
+            // At least a pixel wide: a two-second keep in a twenty-minute
+            // take is a fraction of a pixel and would vanish, which would
+            // say "nothing kept" about a clip that has something.
+            let x0 = strip.left() + a * strip.width();
+            let x1 = (strip.left() + b * strip.width()).max(x0 + 1.0);
+            painter.rect_filled(
+                Rect::from_min_max(
+                    egui::pos2(x0, strip.top()),
+                    egui::pos2(x1.min(strip.right()), strip.bottom()),
+                ),
+                CornerRadius::ZERO,
+                fade(theme::KEEP),
+            );
+        }
+    }
+
     // The flag, top right: clear of the status badges on the left and the
     // duration below, and the only warm mark on the tile.
     if flagged {
@@ -417,7 +531,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
             egui::Align2::CENTER_CENTER,
             "\u{2605}",
             egui::FontId::proportional(11.0),
-            theme::FLAG,
+            fade(theme::FLAG),
         );
     }
 
@@ -427,7 +541,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         egui::Align2::RIGHT_BOTTOM,
         duration,
         egui::FontId::monospace(10.0),
-        theme::TEXT,
+        fade(theme::TEXT),
     );
     if marked {
         painter.text(
@@ -435,7 +549,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
             egui::Align2::LEFT_BOTTOM,
             "▮",
             egui::FontId::proportional(10.0),
-            theme::MARK_IN,
+            fade(theme::MARK_IN),
         );
     }
 
@@ -501,7 +615,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         egui::Align2::LEFT_TOP,
         truncate_middle(&name, max_chars),
         egui::FontId::proportional(11.0),
-        if missing { theme::ERROR } else { theme::TEXT },
+        fade(if missing { theme::ERROR } else { theme::TEXT }),
     );
 
     if selected {
@@ -551,6 +665,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     }
 
     let mut remove = false;
+    let mut set_archived: Option<bool> = None;
     let mut relink = false;
     let mut reveal = false;
     let mut flag = false;
@@ -596,8 +711,24 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
             ui.close_kind(egui::UiKind::Menu);
         }
         ui.separator();
-        ui.add_enabled_ui(uses == 0, |ui| {
-            if ui.button("Remove from bin").clicked() {
+        if archived {
+            if ui.button("Restore to bin").clicked() {
+                set_archived = Some(false);
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        } else if ui
+            .button("Archive")
+            .on_hover_text("Delete does this too. The clip keeps its marks and its good stretches.")
+            .clicked()
+        {
+            set_archived = Some(true);
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        // Removing for good is offered only once a clip has been set aside,
+        // so the destructive item is never the one sitting under the pointer
+        // during a first pass.
+        ui.add_enabled_ui(uses == 0 && archived, |ui| {
+            if ui.button("Remove from project").clicked() {
                 remove = true;
                 ui.close_kind(egui::UiKind::Menu);
             }
@@ -618,6 +749,9 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     }
     if flag {
         app.toggle_flag(id);
+    }
+    if let Some(on) = set_archived {
+        app.set_archived(id, on);
     }
     if reveal {
         app.reveal_clip(id);

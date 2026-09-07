@@ -23,6 +23,9 @@ pub enum Action {
     ClearIn,
     ClearOut,
     ClearMarks,
+    /// Keep the marked range as a highlight, or drop the one under the
+    /// playhead.
+    KeepRange,
 
     // Assembly
     Append,
@@ -103,6 +106,7 @@ pub const KEY_MAP: &[Section] = &[
             Binding { keys: "Shift+I", description: "Clear in", scope: Scope::Source },
             Binding { keys: "Shift+O", description: "Clear out", scope: Scope::Source },
             Binding { keys: "Shift+X", description: "Clear both", scope: Scope::Source },
+            Binding { keys: "G", description: "Keep the marked range as good material — press again inside one to drop it", scope: Scope::Source },
         ],
     },
     Section {

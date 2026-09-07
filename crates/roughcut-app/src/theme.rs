@@ -21,6 +21,10 @@ pub const PLAYHEAD: Color32 = Color32::from_rgb(0xff, 0xd8, 0x4c);
 /// colour: a flag is a judgement you made, not something the tool is telling
 /// you about the file.
 pub const FLAG: Color32 = Color32::from_rgb(0xff, 0xc8, 0x4c);
+/// Material kept as good. Deliberately a colder, deeper green than
+/// `MARK_IN`: the two appear on the same scrub bar, and a mark you are
+/// placing now must not read as a stretch you decided about earlier.
+pub const KEEP: Color32 = Color32::from_rgb(0x2f, 0xa8, 0x6a);
 /// The audio envelope under the scrub bar. Deliberately unsaturated: it is a
 /// map of where to look, drawn underneath the marks, and it must never compete
 /// with them for attention.

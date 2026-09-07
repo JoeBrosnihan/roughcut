@@ -63,6 +63,8 @@ fn clip(name: &str, frames: i64) -> SourceClip {
         rate_mismatch: false,
         variable_rate: false,
         flagged: false,
+        highlights: Vec::new(),
+        archived: false,
     }
 }
 

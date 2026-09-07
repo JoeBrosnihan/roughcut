@@ -573,6 +573,8 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                         rate_mismatch: false,
                         variable_rate: false,
                         flagged: false,
+                        highlights: Vec::new(),
+                        archived: false,
                     };
                     proxy::generate(ffmpeg, ffprobe, &stub, &info, &proxy_dir)
                 }

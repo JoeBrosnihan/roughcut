@@ -401,6 +401,8 @@ mod tests {
             rate_mismatch: false,
             variable_rate: false,
             flagged: false,
+            highlights: Vec::new(),
+            archived: false,
         });
         id
     }

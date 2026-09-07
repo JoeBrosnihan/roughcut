@@ -155,19 +155,21 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
     );
 
     // What span is the bar showing?
-    let (total, marks, clip_id) = match app.focus {
+    let (total, marks, clip_id, highlights) = match app.focus {
         Focus::Source => match app.selected_source() {
             Some(c) => (
                 c.duration_frames,
                 Some((c.mark_in, c.mark_out, c.last_frame())),
                 Some(c.id),
+                c.highlights.clone(),
             ),
-            None => (0, None, None),
+            None => (0, None, None, Vec::new()),
         },
         Focus::Timeline => (
             timeline::total_frames(&app.project.timeline),
             None,
             None,
+            Vec::new(),
         ),
     };
     if total <= 0 {
@@ -290,6 +292,21 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
 
     if let Some(peaks) = clip_id.and_then(|id| app.waveforms.get(&id)) {
         waveform(&painter, track, peaks);
+    }
+
+    // The stretches already decided about, under everything else: a mark
+    // being placed now has to stay readable on top of them.
+    for h in &highlights {
+        let span = Rect::from_min_max(
+            egui::pos2(x_of(h.in_frame), track.top()),
+            // A short keep in a long clip is a sliver; never less than a
+            // pixel, or a real decision would draw as nothing.
+            egui::pos2(
+                (x_of(h.out_frame)).max(x_of(h.in_frame) + 1.0),
+                track.bottom(),
+            ),
+        );
+        painter.rect_filled(span, CornerRadius::ZERO, theme::KEEP.linear_multiply(0.55));
     }
 
     // Marked range is shaded.

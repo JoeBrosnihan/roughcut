@@ -19,7 +19,7 @@ use roughcut_core::model::{ClipId, Project, TimelineItem};
 use roughcut_core::probe::MediaInfo;
 use roughcut_core::project_io;
 use roughcut_core::rotate::Turn;
-use roughcut_core::time::{format_timecode, Rational};
+use roughcut_core::time::{format_timecode, inclusive_len, Rational};
 use roughcut_core::timeline::{self, Edge};
 use roughcut_core::transcript::{Selection, Transcript};
 use roughcut_core::tools::{expand_drop, Tools};
@@ -979,6 +979,7 @@ impl RoughcutApp {
             Action::ClearIn => self.mark(MarkOp::ClearIn),
             Action::ClearOut => self.mark(MarkOp::ClearOut),
             Action::ClearMarks => self.mark(MarkOp::ClearBoth),
+            Action::KeepRange => self.toggle_keep(),
 
             Action::Append => {
                 // In the document, `A` appends what is selected. It is the
@@ -998,7 +999,7 @@ impl RoughcutApp {
             Action::Split => self.split(),
             // Delete removes whatever is in the region you are looking at.
             Action::RippleDelete => match self.focus {
-                Focus::Source => self.remove_selected_clip(),
+                Focus::Source => self.delete_selected_clip(),
                 // A selected sound is what the key means; otherwise it is the
                 // clip under the playhead, as before.
                 Focus::Timeline if self.selected_audio.is_some() => {
@@ -1104,6 +1105,161 @@ impl RoughcutApp {
             }
         });
         let _ = changed;
+    }
+
+    /// Keep the marked range as good material, or drop the kept stretch the
+    /// playhead is sitting in.
+    ///
+    /// One key for both directions, because a review pass is one motion: mark
+    /// a good bit, keep it, carry on — and the correction for keeping the
+    /// wrong bit has to be as immediate as the mistake. Which direction it
+    /// goes is never ambiguous: the playhead is either inside a stretch that
+    /// has already been kept or it is not.
+    ///
+    /// Marks are cleared once a stretch is kept. They are the working range,
+    /// and leaving them set means the next `I` starts from something already
+    /// decided rather than from nothing.
+    fn toggle_keep(&mut self) {
+        let Some(id) = self.selected_clip else {
+            self.set_status("select a clip in the bin first", StatusKind::Warn);
+            return;
+        };
+        let frame = self.source_frame;
+        let Some(clip) = self.project.clip(id) else {
+            return;
+        };
+        let fps = self.project.fps();
+
+        if let Some(at) = clip.highlight_at(frame) {
+            let dropped = clip.highlights[at];
+            self.edit(|p| {
+                p.clip_mut(id).is_some_and(|c| c.unkeep_at(frame).is_some())
+            });
+            self.set_status(
+                format!("dropped {}", format_timecode(dropped.len(), fps)),
+                StatusKind::Info,
+            );
+            return;
+        }
+
+        // An unmarked clip resolves to its whole length, which is not a
+        // judgement about anything — keeping it would say "all of this is
+        // good" on a key pressed by accident.
+        if clip.mark_in.is_none() && clip.mark_out.is_none() {
+            self.set_status(
+                "mark a range first — I and O, or shift-drag the scrub bar",
+                StatusKind::Warn,
+            );
+            return;
+        }
+        let Some((a, b)) = clip.marked_range() else {
+            self.set_status("that clip has no usable range", StatusKind::Warn);
+            return;
+        };
+        let kept = self.edit(|p| {
+            let Some(c) = p.clip_mut(id) else { return false };
+            if !c.keep(a, b) {
+                return false;
+            }
+            c.mark_in = None;
+            c.mark_out = None;
+            true
+        });
+        if kept {
+            let total = self
+                .project
+                .clip(id)
+                .map(|c| c.highlights.len())
+                .unwrap_or(0);
+            self.set_status(
+                format!(
+                    "kept {} — {total} good stretch{} in this clip",
+                    format_timecode(inclusive_len(a, b), fps),
+                    if total == 1 { "" } else { "es" }
+                ),
+                StatusKind::Info,
+            );
+        }
+    }
+
+    /// Set a clip aside, or bring one back. Undoable either way: it is an
+    /// edit to the project like any other.
+    pub fn set_archived(&mut self, id: ClipId, archived: bool) {
+        let name = self
+            .project
+            .clip(id)
+            .map(|c| c.file_name())
+            .unwrap_or_default();
+        let changed = self.edit(|p| match p.clip_mut(id) {
+            Some(c) if c.archived != archived => {
+                c.archived = archived;
+                true
+            }
+            _ => false,
+        });
+        if !changed {
+            return;
+        }
+        if archived {
+            // Nothing is spent on a clip that has been set aside: its scrub
+            // sheet is the largest thing the bin holds, and it is now behind
+            // a view nobody has open.
+            self.sheets.remove(&id);
+            self.sheet_requested.remove(&id);
+            self.pending_sheets.remove(&id);
+            // Land somewhere that still exists, or the monitor keeps showing
+            // a clip the bin no longer offers.
+            if self.selected_clip == Some(id) && !self.settings.show_archived {
+                self.selected_clip = self.first_visible_clip();
+                self.source_frame = 0;
+                self.monitor.clear();
+            }
+            self.set_status(
+                format!("archived {name} — Bin ▸ Show archived to see it again"),
+                StatusKind::Info,
+            );
+        } else {
+            self.set_status(format!("restored {name}"), StatusKind::Info);
+        }
+    }
+
+    /// Show or hide the clips that have been set aside.
+    pub fn set_show_archived(&mut self, on: bool) {
+        if self.settings.show_archived == on {
+            return;
+        }
+        self.settings.show_archived = on;
+        self.settings.save();
+        if !on {
+            // The selection cannot stay on a clip that has just left the view.
+            if self
+                .selected_clip
+                .is_some_and(|id| self.project.clip(id).is_some_and(|c| c.archived))
+            {
+                self.selected_clip = self.first_visible_clip();
+                self.source_frame = 0;
+                self.monitor.clear();
+            }
+        }
+    }
+
+    /// The first clip the bin is actually showing, for landing a selection on.
+    fn first_visible_clip(&self) -> Option<ClipId> {
+        self.project
+            .clips
+            .iter()
+            .find(|c| self.settings.show_archived || !c.archived)
+            .map(|c| c.id)
+    }
+
+    /// Whether a clip is worth spending background work on.
+    ///
+    /// An archived clip has been rejected, so building its proxy, its scrub
+    /// sheet or its transcript is work spent on footage nobody asked to see —
+    /// unless it is on the timeline, where it is still being played.
+    fn worth_preparing(&self, id: ClipId) -> bool {
+        let archived = self.project.clip(id).is_some_and(|c| c.archived);
+        !archived || self.settings.show_archived || self.project.timeline_uses(id) > 0
     }
 
     fn marked_range(&self) -> Option<(ClipId, i64, i64)> {
@@ -1277,7 +1433,27 @@ impl RoughcutApp {
         }
     }
 
-    /// Remove the selected clip from the bin.
+    /// What Delete does to the selected bin clip.
+    ///
+    /// Twice, deliberately. The first press archives: rejecting footage is
+    /// most of a first pass and has to cost one key, but a clip dismissed in
+    /// the first ten minutes is exactly the one wanted in the last, so it
+    /// cannot be the same key that destroys work. The second press — which
+    /// can only be reached from the archived view, on a clip already set
+    /// aside — is the one that actually removes it.
+    pub fn delete_selected_clip(&mut self) {
+        let Some(id) = self.selected_clip else {
+            self.set_status("no clip selected in the bin", StatusKind::Warn);
+            return;
+        };
+        if self.project.clip(id).is_some_and(|c| !c.archived) {
+            self.set_archived(id, true);
+            return;
+        }
+        self.remove_selected_clip();
+    }
+
+    /// Remove the selected clip from the bin for good.
     pub fn remove_selected_clip(&mut self) {
         let Some(id) = self.selected_clip else {
             self.set_status("no clip selected in the bin", StatusKind::Warn);
@@ -1301,14 +1477,23 @@ impl RoughcutApp {
             .unwrap_or_default();
         // Pick the neighbour to land on before the clip disappears.
         let next = {
-            let i = self.project.clips.iter().position(|c| c.id == id);
+            // The neighbour has to be one the bin is actually showing, or
+            // the selection lands on a clip that is not on screen.
+            let show_archived = self.settings.show_archived;
+            let visible: Vec<ClipId> = self
+                .project
+                .clips
+                .iter()
+                .filter(|c| show_archived || !c.archived)
+                .map(|c| c.id)
+                .collect();
+            let i = visible.iter().position(|c| *c == id);
             i.and_then(|i| {
-                self.project
-                    .clips
+                visible
                     .get(i + 1)
-                    .or_else(|| if i > 0 { self.project.clips.get(i - 1) } else { None })
+                    .or_else(|| if i > 0 { visible.get(i - 1) } else { None })
             })
-            .map(|c| c.id)
+            .copied()
         };
         if self.edit(|p| p.remove_clip(id)) {
             self.posters.remove(&id);
@@ -2767,6 +2952,10 @@ impl RoughcutApp {
         if clip.still {
             return;
         }
+        // Footage that has been set aside is not worth minutes of ffmpeg.
+        if !self.worth_preparing(id) {
+            return;
+        }
         // Already has one, or is already having one made.
         if clip.proxy_path.as_ref().is_some_and(|p| p.exists())
             || matches!(
@@ -2868,6 +3057,9 @@ impl RoughcutApp {
     /// two hundred clips only ever builds sheets for the ones looked at.
     pub fn request_scrub_sheet(&mut self, id: ClipId) {
         if self.sheets.contains_key(&id) {
+            return;
+        }
+        if !self.worth_preparing(id) {
             return;
         }
         // Already queued behind every other visible tile. Somebody asking
@@ -3006,6 +3198,9 @@ impl RoughcutApp {
         if self.transcripts.contains_key(&id) || self.tools.whisper.is_none() {
             return;
         }
+        if !self.worth_preparing(id) {
+            return;
+        }
         // Already queued. Asking again means somebody is now looking at this
         // clip, so it goes to the front rather than waiting its turn.
         if self.transcript_requested.contains(&id) {
@@ -3121,6 +3316,7 @@ impl RoughcutApp {
             .iter()
             .filter(|c| !self.posters.contains_key(&c.id))
             .map(|c| c.id)
+            .filter(|id| self.worth_preparing(*id))
             .collect();
         for id in ids {
             self.request_thumbnail(id);

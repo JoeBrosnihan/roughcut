@@ -107,6 +107,7 @@ fn map_key(key: Key, m: Modifiers) -> Option<Action> {
         Key::O if shift => Some(Action::ClearOut),
         Key::O => Some(Action::MarkOut),
         Key::X if shift => Some(Action::ClearMarks),
+        Key::G => Some(Action::KeepRange),
 
         // Assembly
         Key::A => Some(Action::Append),

@@ -15,6 +15,13 @@ pub struct Settings {
     /// while an effect pinned to a moment should not.
     #[serde(default)]
     pub ripple_all_tracks: bool,
+    /// Show clips that have been set aside, faded, alongside the rest.
+    ///
+    /// Off by default: the whole point of archiving is that the bin stops
+    /// showing you footage you have already rejected. This is the way back
+    /// in — to restore something, or to remove it for good.
+    #[serde(default)]
+    pub show_archived: bool,
     /// `None` means "beside the project file, in .roughcut-proxies".
     pub proxy_dir: Option<PathBuf>,
     pub ffprobe_path: Option<PathBuf>,
@@ -68,6 +75,7 @@ impl Default for Settings {
         Self {
             proxies_enabled: false,
             ripple_all_tracks: false,
+            show_archived: false,
             proxy_dir: None,
             ffprobe_path: None,
             ffmpeg_path: None,

@@ -109,6 +109,8 @@ pub fn add_clip(project: &mut Project, path: &Path, info: &MediaInfo) -> ImportO
         rate_mismatch,
         variable_rate: info.variable_rate,
         flagged: false,
+        highlights: Vec::new(),
+        archived: false,
     });
 
     crate::profile::refresh_working(project);
