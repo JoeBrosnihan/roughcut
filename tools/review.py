@@ -482,6 +482,13 @@ PAGE = r"""<!doctype html>
     var p = function (n) { return (n < 10 ? "0" : "") + n; };
     return (h ? p(h) + ":" : "") + p(m) + ":" + p(s) + ":" + p(ff);
   }
+  // Minutes, to one decimal: "3.5m". A running total is a sense of scale,
+  // not a cue point -- nobody needs it to the frame, and m:ss invites you
+  // to read it as one.
+  function mins(f) {
+    if (!f) return "0m";
+    return (f / FPS / 60).toFixed(1) + "m";
+  }
   function mmss(f) {
     var t = Math.round(f / FPS);
     return Math.floor(t / 60) + ":" + (t % 60 < 10 ? "0" : "") + (t % 60);
@@ -540,14 +547,20 @@ PAGE = r"""<!doctype html>
   }
 
   function paintRail() {
-    var cells = $("rail").children, kept = 0, arch = 0;
+    var cells = $("rail").children, kept = 0, arch = 0, all = 0;
     S.clips.forEach(function (c, i) {
-      if (c.arch) arch++; else if (c.hi.length) kept++;
+      // Footage, not clips: a pass is heading for a cut of some length, and
+      // thirty clips holding four seconds each is a different position from
+      // three holding a minute. How many clips are in which state is already
+      // on the rail, cell by cell; the totals are what it cannot show.
+      c.hi.forEach(function (h) { kept += h[1] - h[0] + 1; });
+      if (c.arch) arch += c.frames;
+      all += c.frames;
       cells[i].setAttribute("data-state", c.arch ? "archived" : (c.hi.length ? "kept" : "new"));
       cells[i].setAttribute("data-current", i === at ? "1" : "0");
     });
-    $("tally").innerHTML = "<b>" + kept + "</b> kept &middot; " + arch +
-                           " arch &middot; " + S.clips.length;
+    $("tally").innerHTML = "<b>" + mins(kept) + "</b> kept &middot; " +
+                           mins(arch) + " archived &middot; " + mins(all) + " total";
   }
 
   function render() {
@@ -595,8 +608,11 @@ PAGE = r"""<!doctype html>
       list.appendChild(li);
     });
     $("keepNone").hidden = c.hi.length > 0;
-    $("keepsTitle").textContent = c.hi.length ? "Kept stretches (" + c.hi.length + ")"
-                                             : "Kept stretches";
+    var clipFrames = 0;
+    c.hi.forEach(function (h) { clipFrames += h[1] - h[0] + 1; });
+    $("keepsTitle").textContent = c.hi.length
+      ? "Kept stretches \u00b7 " + mmss(clipFrames) + " of " + mmss(c.frames)
+      : "Kept stretches";
     paintBar(); paintHead(); paintRail();
   }
 
