@@ -243,8 +243,14 @@ PAGE = r"""<!doctype html>
 
   /* The same shape as the scrub bar under the monitor in the window:
      kept stretches in green, the range being chosen on top of them. */
-  .bar { position:relative; height:34px; margin-top:10px; background:var(--raised);
-         border:1px solid var(--line); overflow:hidden; }
+  /* The one control that matters: drag across it to choose a stretch, tap
+     it to move the playhead. Tall enough to grab with a thumb, and
+     touch-action:none so the page does not scroll out from under the drag. */
+  .bar { position:relative; height:46px; margin-top:10px; background:var(--raised);
+         border:1px solid var(--line); overflow:hidden; touch-action:none;
+         cursor:ew-resize; }
+  .hint { position:absolute; inset:0; display:grid; place-items:center;
+          font-size:12px; color:var(--dim); pointer-events:none; }
   .kept { position:absolute; top:0; bottom:0; background:rgba(47,168,106,.72);
           border-left:1px solid var(--keep-lit); border-right:1px solid var(--keep-lit); }
   .sel  { position:absolute; top:0; bottom:0; background:rgba(76,154,255,.26);
@@ -255,11 +261,19 @@ PAGE = r"""<!doctype html>
              font-size:13px; font-variant-numeric:tabular-nums; color:var(--dim); }
   .readout .span { color:var(--text); }
   .readout .dur { margin-left:auto; color:var(--keep-lit); }
+  /* Dismissing a half-made choice is not worth a button the size of the
+     ones that commit one. */
+  .readout .x { flex:0 0 auto; min-height:0; padding:0 6px; font-size:15px;
+                line-height:1.2; background:none; border:0; color:var(--dim); }
 
   .row { display:flex; gap:8px; margin-top:10px; }
+  /* min-width:0 matters: a flex item will not shrink below its own
+     min-content width without it, so one long label ("Restore to bin")
+     pushed the whole row wider than the phone. */
   button { font:600 15px var(--ui); color:var(--text); background:var(--raised);
-           border:1px solid var(--line); border-radius:3px; padding:13px 12px;
-           min-height:46px; flex:1 1 0; }
+           border:1px solid var(--line); border-radius:3px; padding:13px 10px;
+           min-height:46px; flex:1 1 0; min-width:0; overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }
   button:active { background:#2c2c31; }
   button:disabled { opacity:.4; }
   .primary { background:var(--keep); border-color:var(--keep-lit); color:#06130c; }
@@ -271,13 +285,15 @@ PAGE = r"""<!doctype html>
               text-transform:uppercase; color:var(--dim); margin:0 0 6px; }
   .keeps ul { list-style:none; margin:0; padding:0; display:flex;
               flex-direction:column; gap:4px; }
+  /* The row itself plays the stretch, so only dropping needs a control. */
   .keeps li { display:flex; align-items:center; gap:10px; background:var(--panel);
               border:1px solid var(--line); border-left:3px solid var(--keep);
-              padding:9px 10px; font-family:var(--mono); font-size:12px;
-              font-variant-numeric:tabular-nums; }
+              padding:11px 10px; font-family:var(--mono); font-size:12px;
+              font-variant-numeric:tabular-nums; cursor:pointer; }
+  .keeps li:active { background:var(--raised); }
   .keeps .of { color:var(--dim); margin-left:auto; }
-  .keeps .go, .keeps .drop { flex:0 0 auto; min-height:0; padding:5px 10px;
-              font-size:12px; background:transparent; color:var(--dim); }
+  .keeps .drop { flex:0 0 auto; min-height:0; padding:2px 8px; font-size:15px;
+              line-height:1.2; background:none; border:0; color:var(--dim); }
   .none { font-size:13px; color:var(--dim); background:var(--panel);
           border:1px dashed var(--line); padding:12px; text-align:center; }
 
@@ -310,20 +326,17 @@ PAGE = r"""<!doctype html>
     </div>
 
     <div class="bar" id="bar">
+      <div class="hint" id="hint">Drag across to choose a stretch</div>
       <div class="head" id="head" style="left:0"></div>
     </div>
     <div class="readout">
-      <span class="span" id="span">Play, then mark in and out</span>
+      <span class="span" id="span">&nbsp;</span>
       <span class="dur" id="dur"></span>
+      <button class="x" id="clear" hidden aria-label="Discard this stretch">&times;</button>
     </div>
 
     <div class="row">
-      <button id="markIn">Mark in</button>
-      <button id="markOut">Mark out</button>
-    </div>
-    <div class="row">
       <button id="keep" class="primary" disabled>Keep this stretch</button>
-      <button id="clear" disabled>Clear</button>
     </div>
     <div class="row">
       <button id="prev">‹ Prev</button>
@@ -399,12 +412,12 @@ PAGE = r"""<!doctype html>
       $("span").textContent = tc(a) + " → " + tc(b);
       $("dur").textContent = "+" + tc(b - a + 1);
     } else {
-      $("span").textContent = "Play, then mark in and out";
+      $("span").innerHTML = "&nbsp;";
       $("dur").textContent = "";
     }
-    var whole = sel && sel[0] !== null && sel[1] !== null;
-    $("keep").disabled = !whole;
-    $("clear").disabled = !sel;
+    $("keep").disabled = !sel;
+    $("clear").hidden = !sel;
+    $("hint").hidden = !!sel || c.hi.length > 0;
   }
 
   function paintHead() {
@@ -430,7 +443,7 @@ PAGE = r"""<!doctype html>
     $("length").textContent = mmss(c.frames);
     $("clip").classList.toggle("archived", c.arch);
     $("badge").hidden = !c.arch;
-    $("archive").textContent = c.arch ? "Restore to bin" : "Archive";
+    $("archive").textContent = c.arch ? "Restore" : "Archive";
     $("archive").classList.toggle("on", c.arch);
     $("prev").disabled = at === 0;
     $("next").disabled = at === S.clips.length - 1;
@@ -452,17 +465,18 @@ PAGE = r"""<!doctype html>
       var of = document.createElement("span");
       of.className = "of";
       of.textContent = tc(h[1] - h[0] + 1);
-      var go = document.createElement("button");
-      go.className = "go"; go.textContent = "Play";
-      go.onclick = function () { v.currentTime = h[0] / FPS; v.play(); };
+      li.title = "Play this stretch";
+      li.onclick = function () { v.currentTime = h[0] / FPS; v.play(); };
       var drop = document.createElement("button");
-      drop.className = "drop"; drop.textContent = "Drop";
-      drop.onclick = function () {
+      drop.className = "drop"; drop.innerHTML = "&times;";
+      drop.setAttribute("aria-label", "Drop the stretch at " + tc(h[0]));
+      drop.onclick = function (e) {
+        e.stopPropagation();          // the row plays; the cross removes
         send("/drop", { clip: c.id, index: i }).then(function (r) {
           c.hi = r.hi; render(); status("Dropped — written to the project.", "ok");
-        }).catch(function (e) { status("Could not drop that: " + e.message, "error"); });
+        }).catch(function (e2) { status("Could not drop that: " + e2.message, "error"); });
       };
-      li.appendChild(span); li.appendChild(of); li.appendChild(go); li.appendChild(drop);
+      li.appendChild(span); li.appendChild(of); li.appendChild(drop);
       list.appendChild(li);
     });
     $("keepNone").hidden = c.hi.length > 0;
@@ -478,17 +492,58 @@ PAGE = r"""<!doctype html>
     window.scrollTo({ top: 0 });
   }
 
-  $("markIn").onclick = function () {
-    var f = frameNow();
-    sel = sel ? [f, sel[1] === null || sel[1] < f ? null : sel[1]] : [f, null];
-    paintBar();
-  };
-  $("markOut").onclick = function () {
-    var f = frameNow();
-    if (!sel || sel[0] === null || sel[0] > f) sel = [0, f]; else sel = [sel[0], f];
-    paintBar();
-  };
   $("clear").onclick = function () { sel = null; paintBar(); };
+
+  // One gesture on the bar does both jobs: a drag paints the stretch you are
+  // choosing, a tap moves the playhead. They are told apart by distance, so
+  // neither has to be a button.
+  (function () {
+    var bar = $("bar"), mode = null, anchor = 0, startX = 0, moved = false;
+    var SLOP = 6;                       // px before a tap becomes a drag
+
+    function frameAt(clientX) {
+      var r = bar.getBoundingClientRect(), c = clip();
+      var t = (clientX - r.left) / r.width;
+      return Math.max(0, Math.min(c.frames - 1, Math.round(t * (c.frames - 1))));
+    }
+
+    bar.addEventListener("pointerdown", function (e) {
+      bar.setPointerCapture(e.pointerId);
+      startX = e.clientX;
+      moved = false;
+      var f = frameAt(e.clientX), c = clip();
+      // Grabbing near an edge of the pending stretch adjusts that edge --
+      // the commonest correction after a coarse drag with a thumb.
+      var grab = (c.frames - 1) * 0.05;
+      if (sel && Math.abs(f - sel[0]) <= grab) { mode = "in"; anchor = sel[1]; }
+      else if (sel && Math.abs(f - sel[1]) <= grab) { mode = "out"; anchor = sel[0]; }
+      else { mode = "new"; anchor = f; }
+      e.preventDefault();
+    });
+
+    bar.addEventListener("pointermove", function (e) {
+      if (mode === null) return;
+      if (!moved && Math.abs(e.clientX - startX) < SLOP) return;
+      moved = true;
+      var f = frameAt(e.clientX);
+      sel = mode === "in" ? [f, anchor] : [anchor, f];
+      paintBar();
+    });
+
+    function end(e) {
+      if (mode === null) return;
+      if (!moved) {
+        // A tap: go there, and leave any pending stretch alone.
+        v.currentTime = frameAt(e.clientX) / FPS;
+      } else if (sel) {
+        sel = [Math.min(sel[0], sel[1]), Math.max(sel[0], sel[1])];
+      }
+      mode = null;
+      paintBar();
+    }
+    bar.addEventListener("pointerup", end);
+    bar.addEventListener("pointercancel", function () { mode = null; });
+  })();
 
   $("keep").onclick = function () {
     var c = clip();
@@ -511,12 +566,6 @@ PAGE = r"""<!doctype html>
   $("next").onclick = function () { go(at + 1); };
   v.addEventListener("timeupdate", paintHead);
   v.addEventListener("seeked", paintHead);
-
-  $("bar").addEventListener("click", function (e) {
-    var r = this.getBoundingClientRect();
-    var c = clip();
-    v.currentTime = ((e.clientX - r.left) / r.width) * (c.frames / FPS);
-  });
 
   fetch("/state").then(function (r) { return r.json(); }).then(function (s) {
     S = s; FPS = s.fps;
