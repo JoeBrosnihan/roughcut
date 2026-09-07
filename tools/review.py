@@ -330,11 +330,12 @@ PAGE = r"""<!doctype html>
          cursor:ew-resize; }
   .hint { position:absolute; inset:0; display:grid; place-items:center;
           font-size:12px; color:var(--dim); pointer-events:none; }
-  .kept { position:absolute; top:0; bottom:0; background:rgba(47,168,106,.72);
+  .bar .kept { position:absolute; top:0; bottom:0; background:rgba(47,168,106,.72);
           border-left:1px solid var(--keep-lit); border-right:1px solid var(--keep-lit); }
-  .sel  { position:absolute; top:0; bottom:0; background:rgba(76,154,255,.26);
+  .bar .sel  { position:absolute; top:0; bottom:0; background:rgba(76,154,255,.26);
           border-left:2px solid var(--keep-lit); border-right:2px solid var(--out); }
-  .head { position:absolute; top:0; bottom:0; width:2px; background:var(--playhead,#ffd84c); }
+  .bar .head { position:absolute; top:0; bottom:0; width:2px;
+          background:var(--playhead,#ffd84c); }
 
   .readout { display:flex; gap:12px; margin-top:6px; font-family:var(--mono);
              font-size:13px; font-variant-numeric:tabular-nums; color:var(--dim); }
@@ -390,12 +391,12 @@ PAGE = r"""<!doctype html>
                border-bottom:1px solid var(--line); align-items:baseline; }
   .script li:active { background:var(--raised); }
   .script li.now { background:#1c2128; box-shadow:inset 3px 0 0 var(--accent); }
-  .script li.kept { box-shadow:inset 3px 0 0 var(--keep); }
-  .script li.now.kept { box-shadow:inset 3px 0 0 var(--keep-lit); }
+  .script li.claimed { box-shadow:inset 3px 0 0 var(--keep); }
+  .script li.now.claimed { box-shadow:inset 3px 0 0 var(--keep-lit); }
   .script .at { flex:0 0 auto; font-family:var(--mono); font-size:12px;
                 font-variant-numeric:tabular-nums; color:var(--accent);
                 min-width:44px; }
-  .script li.kept .at { color:var(--keep-lit); }
+  .script li.claimed .at { color:var(--keep-lit); }
   .script .said { flex:1 1 auto; min-width:0; font-size:15px; }
 
   .status { margin:14px 12px 0; padding:9px 11px; font-size:12px; color:var(--dim);
@@ -645,7 +646,7 @@ PAGE = r"""<!doctype html>
       li.dataset.i = i;
       // A line already inside a kept stretch is marked, so a second pass
       // can see what has been claimed without cross-checking the bar.
-      if (inKept(line.frame)) li.classList.add("kept");
+      if (inKept(line.frame)) li.classList.add("claimed");
       var at_ = document.createElement("span");
       at_.className = "at";
       at_.textContent = mmss(line.frame);
