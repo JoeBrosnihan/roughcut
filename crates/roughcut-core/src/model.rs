@@ -503,6 +503,29 @@ mod tests {
         assert_eq!(c.unkeep_at(550), None, "already gone");
     }
 
+    /// What assembly reads off a clip: its good stretches if it has any,
+    /// and only otherwise the marked range. The rule lives here rather than
+    /// in the window because the phone tool and the window must agree.
+    #[test]
+    fn kept_stretches_are_what_a_clip_offers_the_timeline() {
+        let mut c = clip(1000);
+        // Nothing kept: the marked range is all there is to offer.
+        c.mark_in = Some(100);
+        c.mark_out = Some(200);
+        assert!(c.highlights.is_empty());
+        assert_eq!(c.marked_range(), Some((100, 200)));
+
+        // Once stretches exist they are what should be laid down, in order,
+        // and the marks are no longer the answer.
+        c.keep(600, 700);
+        c.keep(300, 400);
+        assert_eq!(spans(&c), [(300, 400), (600, 700)]);
+        assert_eq!(c.highlights.len(), 2);
+        assert_eq!(c.highlighted_frames(), 202);
+        // The marks are untouched — they are still the working range.
+        assert_eq!(c.marked_range(), Some((100, 200)));
+    }
+
     #[test]
     fn a_stretch_is_clamped_to_the_clip_and_may_be_given_backwards() {
         let mut c = clip(300);

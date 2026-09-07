@@ -392,7 +392,8 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     let Some(clip) = app.project.clip(id) else {
         return;
     };
-    let selected = app.selected_clip == Some(id);
+    let showing = app.selected_clip == Some(id);
+    let selected = showing || app.is_picked(id);
     let name = clip.file_name();
     let duration_frames = clip.duration_frames;
     let duration = format_timecode(duration_frames, app.project.fps());
@@ -438,8 +439,12 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         painter.rect_filled(
             rect,
             CornerRadius::ZERO,
-            if selected {
+            if showing {
                 theme::CLIP_SELECTED
+            } else if selected {
+                // Picked, but not the one being watched: the same colour at
+                // half strength, so a run of them reads as one thing.
+                theme::CLIP_SELECTED.linear_multiply(0.55)
             } else {
                 theme::PANEL_ALT
             },
@@ -630,7 +635,9 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
     // --- interaction --------------------------------------------------------
 
     if response.drag_started() {
-        app.select_bin_clip(id);
+        if !app.is_picked(id) {
+            app.select_bin_clip(id);
+        }
         egui::DragAndDrop::set_payload(ui.ctx(), id);
     }
     if response.dragged() {
@@ -641,12 +648,18 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
             StrokeKind::Inside,
         );
     }
-    // Middle-click, or Ctrl with the left button, flags the clip instead of
-    // selecting it. Both are reachable without leaving the contact sheet,
-    // which is the point: culling is a pass you do at speed.
-    let ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
-    if response.clicked_by(egui::PointerButton::Middle) || (response.clicked() && ctrl) {
+    // Middle-click flags the clip: reachable without leaving the contact
+    // sheet, which is the point, since culling is a pass you do at speed.
+    // Ctrl and Shift belong to picking clips out — that is what they do in
+    // every other list on the machine, and a bin that disagreed would be
+    // wrong in a way no label could fix.
+    let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
+    if response.clicked_by(egui::PointerButton::Middle) {
         app.toggle_flag(id);
+    } else if response.clicked() && ctrl {
+        app.toggle_bin_pick(id);
+    } else if response.clicked() && shift {
+        app.extend_bin_pick(id);
     } else if response.clicked() {
         // Opens at the start, not at the frame under the pointer. Skimming is
         // for finding the clip you want; once you have picked it you want to
@@ -699,7 +712,7 @@ fn tile(app: &mut RoughcutApp, ui: &mut egui::Ui, id: ClipId, rect: Rect) {
         }
         if ui
             .button(if flagged { "Unflag" } else { "Flag as good" })
-            .on_hover_text("Middle-click, or Ctrl+click, a clip to toggle this")
+            .on_hover_text("Middle-click a clip to toggle this")
             .clicked()
         {
             flag = true;

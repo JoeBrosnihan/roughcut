@@ -377,6 +377,16 @@ pub struct RoughcutApp {
     sheet_clock: u64,
     thumb_requested: HashSet<ClipId>,
     sheet_requested: HashSet<ClipId>,
+    /// Every clip picked out in the bin, in bin order.
+    ///
+    /// `selected_clip` stays the one the monitor is showing -- there is one
+    /// picture and it has to be of something. This is what an action acts
+    /// on, which for a single click is the same clip and no different from
+    /// before.
+    pub selection: Vec<ClipId>,
+    /// Where a shift-click measures from: the last clip picked deliberately,
+    /// rather than whichever end of the run was touched most recently.
+    selection_anchor: Option<ClipId>,
     /// Sheets wanted while the clip's proxy is still being made. Building one
     /// from a 4K original is over a hundred full-size decodes for pictures 96
     /// pixels wide; the same sheet from the 540p proxy is a twentieth of the
@@ -490,6 +500,8 @@ impl RoughcutApp {
             sheet_clock: 0,
             thumb_requested: HashSet::new(),
             sheet_requested: HashSet::new(),
+            selection: Vec::new(),
+            selection_anchor: None,
             pending_sheets: HashSet::new(),
             proxy_state: HashMap::new(),
             rotating: HashSet::new(),
@@ -1207,12 +1219,16 @@ impl RoughcutApp {
             self.sheets.remove(&id);
             self.sheet_requested.remove(&id);
             self.pending_sheets.remove(&id);
+        self.selection.retain(|c| *c != id);
             // Land somewhere that still exists, or the monitor keeps showing
             // a clip the bin no longer offers.
             if self.selected_clip == Some(id) && !self.settings.show_archived {
                 self.selected_clip = self.first_visible_clip();
                 self.source_frame = 0;
                 self.monitor.clear();
+            }
+            if !self.settings.show_archived {
+                self.selection.retain(|c| *c != id);
             }
             self.set_status(
                 format!("archived {name} — Bin ▸ Show archived to see it again"),
@@ -1231,6 +1247,14 @@ impl RoughcutApp {
         self.settings.show_archived = on;
         self.settings.save();
         if !on {
+            let hidden: Vec<ClipId> = self
+                .project
+                .clips
+                .iter()
+                .filter(|c| c.archived)
+                .map(|c| c.id)
+                .collect();
+            self.selection.retain(|c| !hidden.contains(c));
             // The selection cannot stay on a clip that has just left the view.
             if self
                 .selected_clip
@@ -1269,25 +1293,84 @@ impl RoughcutApp {
     }
 
     fn append_marked(&mut self) {
-        let Some(id) = self.selected_clip else {
+        let ids = self.picked();
+        if ids.is_empty() {
             self.set_status("nothing marked to append", StatusKind::Warn);
             return;
-        };
-        self.append_clip(id);
+        }
+        let mut clips = 0;
+        let mut cuts = 0;
+        for id in ids {
+            let added = self.append_clip_parts(id);
+            if added > 0 {
+                clips += 1;
+                cuts += added;
+            }
+        }
+        // Worth saying only when one gesture produced several cuts, which is
+        // the case somebody would otherwise have to count on the timeline.
+        if cuts > clips {
+            self.set_status(
+                format!(
+                    "appended {cuts} cuts from {clips} clip{}",
+                    if clips == 1 { "" } else { "s" }
+                ),
+                StatusKind::Info,
+            );
+        }
     }
 
-    /// Append a specific bin clip's marked range to the timeline — the range
-    /// `A` would append, so double-clicking a tile and pressing `A` do the
-    /// same thing.
+    /// Append a specific bin clip to the timeline — the same thing `A` does,
+    /// so double-clicking a tile and pressing `A` agree.
     pub fn append_clip(&mut self, id: ClipId) {
-        let Some((in_frame, out_frame)) =
-            self.project.clip(id).and_then(|c| c.marked_range())
-        else {
+        if self.append_clip_parts(id) == 0 {
             self.set_status("that clip has no usable range", StatusKind::Warn);
-            return;
-        };
-        if self.edit(|p| timeline::append(p, id, in_frame, out_frame)) {
         }
+    }
+
+    /// Put a clip on the timeline as the good parts of it, and only fall back
+    /// to the marked range when none have been picked out.
+    ///
+    /// This is the point of keeping stretches: having decided which parts of
+    /// a take are worth using, assembling them should not mean marking them a
+    /// second time. Dragging a clip in by hand still lays down the whole
+    /// thing — that gesture says where a clip goes, and a person doing it by
+    /// hand has said what they want.
+    ///
+    /// Returns how many cuts were added.
+    fn append_clip_parts(&mut self, id: ClipId) -> usize {
+        let highlights: Vec<(i64, i64)> = self
+            .project
+            .clip(id)
+            .map(|c| {
+                c.highlights
+                    .iter()
+                    .map(|h| (h.in_frame, h.out_frame))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if highlights.is_empty() {
+            let Some((in_frame, out_frame)) =
+                self.project.clip(id).and_then(|c| c.marked_range())
+            else {
+                return 0;
+            };
+            return usize::from(self.edit(|p| timeline::append(p, id, in_frame, out_frame)));
+        }
+
+        // One edit for the whole clip, so undo takes back the gesture rather
+        // than one stretch of it.
+        let mut added = 0;
+        self.edit(|p| {
+            for (in_frame, out_frame) in &highlights {
+                if timeline::append(p, id, *in_frame, *out_frame) {
+                    added += 1;
+                }
+            }
+            added > 0
+        });
+        added
     }
 
     fn insert_marked(&mut self) {
@@ -1500,6 +1583,7 @@ impl RoughcutApp {
             self.sheets.remove(&id);
             self.sheet_requested.remove(&id);
             self.pending_sheets.remove(&id);
+        self.selection.retain(|c| *c != id);
             self.thumb_requested.remove(&id);
             self.proxy_state.remove(&id);
             self.selected_clip = next;
@@ -1997,6 +2081,80 @@ impl RoughcutApp {
         }
     }
 
+    /// Is this clip part of the current pick?
+    pub fn is_picked(&self, id: ClipId) -> bool {
+        self.selection.contains(&id)
+    }
+
+    /// The clips an action should act on: everything picked, in bin order.
+    fn picked(&self) -> Vec<ClipId> {
+        let order: Vec<ClipId> = self
+            .project
+            .clips
+            .iter()
+            .map(|c| c.id)
+            .filter(|id| self.selection.contains(id))
+            .collect();
+        if order.is_empty() {
+            self.selected_clip.into_iter().collect()
+        } else {
+            order
+        }
+    }
+
+    /// Add a clip to the pick, or take it out again. Ctrl-click.
+    pub fn toggle_bin_pick(&mut self, id: ClipId) {
+        if let Some(at) = self.selection.iter().position(|c| *c == id) {
+            self.selection.remove(at);
+            // Keep showing something that is still picked, so the monitor
+            // never sits on a clip the bin no longer highlights. `show_clip`
+            // and not `select_bin_clip`: moving the picture must not collapse
+            // the rest of the pick to the one clip it moved to.
+            if self.selected_clip == Some(id) {
+                if let Some(next) = self.selection.last().copied() {
+                    self.show_clip(next);
+                }
+            }
+        } else {
+            self.selection.push(id);
+            self.selection_anchor = Some(id);
+            self.show_clip(id);
+        }
+    }
+
+    /// Pick everything between the anchor and this clip. Shift-click.
+    pub fn extend_bin_pick(&mut self, id: ClipId) {
+        let visible: Vec<ClipId> = self
+            .project
+            .clips
+            .iter()
+            .filter(|c| self.settings.show_archived || !c.archived)
+            .map(|c| c.id)
+            .collect();
+        let anchor = self.selection_anchor.or(self.selected_clip).unwrap_or(id);
+        let (Some(a), Some(b)) = (
+            visible.iter().position(|c| *c == anchor),
+            visible.iter().position(|c| *c == id),
+        ) else {
+            self.select_bin_clip(id);
+            return;
+        };
+        let (lo, hi) = (a.min(b), a.max(b));
+        self.selection = visible[lo..=hi].to_vec();
+        self.show_clip(id);
+    }
+
+    /// Put a clip in the monitor without disturbing the pick.
+    fn show_clip(&mut self, id: ClipId) {
+        self.focus = Focus::Source;
+        if self.selected_clip == Some(id) {
+            return;
+        }
+        self.monitor.pause();
+        self.selected_clip = Some(id);
+        self.source_frame = self.project.clip(id).and_then(|c| c.mark_in).unwrap_or(0);
+    }
+
     pub fn select_bin_clip(&mut self, id: ClipId) {
         // Touching the bin always focuses the source, *including* when the
         // clip was already the selected one. Anything else and a key that acts
@@ -2004,6 +2162,8 @@ impl RoughcutApp {
         // on the timeline, and clicking the clip again does not fix it because
         // there is nothing to change.
         self.focus = Focus::Source;
+        self.selection = vec![id];
+        self.selection_anchor = Some(id);
 
         if self.selected_clip == Some(id) {
             return;
@@ -2097,6 +2257,7 @@ impl RoughcutApp {
         self.sheets.remove(&id);
         self.sheet_requested.remove(&id);
         self.pending_sheets.remove(&id);
+        self.selection.retain(|c| *c != id);
         self.thumb_requested.remove(&id);
         self.proxy_state.remove(&id);
         self.request_thumbnail(id);
@@ -2232,6 +2393,8 @@ impl RoughcutApp {
         self.sheets.clear();
         self.sheet_requested.clear();
         self.pending_sheets.clear();
+        self.selection.clear();
+        self.selection_anchor = None;
         self.thumb_requested.clear();
         self.proxy_state.clear();
         self.missing_media.clear();
@@ -2334,6 +2497,8 @@ impl RoughcutApp {
                 self.sheets.clear();
                 self.sheet_requested.clear();
                 self.pending_sheets.clear();
+        self.selection.clear();
+        self.selection_anchor = None;
                 self.thumb_requested.clear();
                 self.proxy_state.clear();
                 self.workers.clear_queue();
@@ -2597,6 +2762,7 @@ impl RoughcutApp {
             self.sheets.remove(&id);
             self.sheet_requested.remove(&id);
             self.pending_sheets.remove(&id);
+        self.selection.retain(|c| *c != id);
             self.thumb_requested.remove(&id);
             self.set_status(format!("relinked {name}"), StatusKind::Info);
         }
@@ -2882,6 +3048,8 @@ impl RoughcutApp {
             self.thumb_requested.clear();
             self.sheet_requested.clear();
             self.pending_sheets.clear();
+        self.selection.clear();
+        self.selection_anchor = None;
             self.set_status("playing the originals", StatusKind::Info);
             return;
         }
@@ -3020,6 +3188,7 @@ impl RoughcutApp {
         self.thumb_requested.remove(&id);
         self.sheet_requested.remove(&id);
         self.pending_sheets.remove(&id);
+        self.selection.retain(|c| *c != id);
         self.monitor.reload();
     }
 
