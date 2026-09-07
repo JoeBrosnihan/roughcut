@@ -79,6 +79,23 @@ pub fn cut_points(timeline: &[TimelineItem]) -> Vec<i64> {
     points
 }
 
+/// The cut point nearest `frame`, which is where material added now should
+/// go: a boundary that already exists, never a new one.
+///
+/// Adding a clip is not the same act as cutting into a shot. A key pressed
+/// while the playhead happens to sit two thirds of the way through a take
+/// should put the new material at that take's edge, not slice it in half —
+/// splitting is what `S`, and inserting on purpose, are for.
+///
+/// Ties go to the earlier point, so the answer never depends on which way
+/// the playhead was last moving.
+pub fn nearest_cut(timeline: &[TimelineItem], frame: i64) -> i64 {
+    cut_points(timeline)
+        .into_iter()
+        .min_by_key(|p| (p - frame).abs())
+        .unwrap_or(0)
+}
+
 /// Nearest cut point strictly before `frame`.
 pub fn prev_cut(timeline: &[TimelineItem], frame: i64) -> Option<i64> {
     cut_points(timeline).into_iter().filter(|&p| p < frame).next_back()
@@ -372,6 +389,77 @@ fn make_item(
 
 #[cfg(test)]
 mod tests {
+
+    /// Where material added at the playhead actually lands.
+    #[test]
+    fn material_lands_on_the_nearest_boundary_never_inside_a_shot() {
+        let mut p = Project::new();
+        let a = clip(&mut p, 1000);
+        // Three cuts of 100 frames: boundaries at 0, 100, 200, 300.
+        for _ in 0..3 {
+            assert!(append(&mut p, a, 0, 99));
+        }
+        assert_eq!(cut_points(&p.timeline), vec![0, 100, 200, 300]);
+
+        // Just inside a shot goes to that shot's near edge, not into it.
+        assert_eq!(nearest_cut(&p.timeline, 105), 100);
+        assert_eq!(nearest_cut(&p.timeline, 195), 200);
+        // Dead centre is a tie, and ties go earlier so the answer does not
+        // depend on which way the playhead was last moving.
+        assert_eq!(nearest_cut(&p.timeline, 150), 100);
+        // The ends are cut points like any other.
+        assert_eq!(nearest_cut(&p.timeline, 0), 0);
+        assert_eq!(nearest_cut(&p.timeline, 9999), 300);
+        // An empty timeline has one place to put anything.
+        assert_eq!(nearest_cut(&[], 500), 0);
+    }
+
+    /// Adding at a boundary must not cut any existing shot in two.
+    #[test]
+    fn adding_at_a_boundary_leaves_every_existing_cut_whole() {
+        let mut p = Project::new();
+        let a = clip(&mut p, 1000);
+        for _ in 0..3 {
+            assert!(append(&mut p, a, 0, 99));
+        }
+        let before = p.timeline.len();
+
+        let at = nearest_cut(&p.timeline, 140);      // nearest boundary is 100
+        assert_eq!(at, 100);
+        assert!(insert_at(&mut p, at, a, 500, 549).is_some());
+
+        // One more item, not two: nothing was split to make room.
+        assert_eq!(p.timeline.len(), before + 1);
+        assert!(
+            p.timeline.iter().all(|i| i.len() == 100 || i.len() == 50),
+            "an existing cut was split: {:?}",
+            p.timeline.iter().map(|i| i.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(p.timeline[1].in_frame, 500, "the new cut went second");
+    }
+
+    /// A run of stretches goes down in order, each after the last, rather
+    /// than each one shoving the previous further along.
+    #[test]
+    fn a_run_added_at_one_point_keeps_its_order() {
+        let mut p = Project::new();
+        let a = clip(&mut p, 1000);
+        assert!(append(&mut p, a, 0, 99));
+        assert!(append(&mut p, a, 0, 99));
+
+        // Three stretches added at the boundary between them, advancing the
+        // cursor by each one's length -- which is what the app does.
+        let mut at = nearest_cut(&p.timeline, 90);
+        assert_eq!(at, 100);
+        for (i, o) in [(200, 219), (300, 329), (400, 439)] {
+            assert!(insert_at(&mut p, at, a, i, o).is_some());
+            at += o - i + 1;
+        }
+        let ins: Vec<i64> = p.timeline.iter().map(|t| t.in_frame).collect();
+        assert_eq!(ins, vec![0, 200, 300, 400, 0], "{ins:?}");
+        assert_eq!(at, 190);
+    }
+
     use super::*;
     use crate::model::SourceClip;
     use std::path::PathBuf;

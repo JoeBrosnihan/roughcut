@@ -515,15 +515,26 @@ mod tests {
         assert!(c.highlights.is_empty());
         assert_eq!(c.marked_range(), Some((100, 200)));
 
-        // Once stretches exist they are what should be laid down, in order,
-        // and the marks are no longer the answer.
+        // Once stretches exist they are what should be laid down, in order.
         c.keep(600, 700);
         c.keep(300, 400);
         assert_eq!(spans(&c), [(300, 400), (600, 700)]);
         assert_eq!(c.highlights.len(), 2);
         assert_eq!(c.highlighted_frames(), 202);
-        // The marks are untouched — they are still the working range.
+
+        // But a mark set right now still resolves, and outranks them: the
+        // window uses `mark_in`/`mark_out` being present to tell a live
+        // selection from an unmarked clip, which resolves to its whole
+        // length and says nothing.
+        assert!(c.mark_in.is_some() || c.mark_out.is_some());
         assert_eq!(c.marked_range(), Some((100, 200)));
+
+        let mut fresh = clip(1000);
+        fresh.keep(300, 400);
+        assert!(fresh.mark_in.is_none() && fresh.mark_out.is_none());
+        // Unmarked: the whole clip, which is why it must not outrank a kept
+        // stretch — it is a default, not a decision.
+        assert_eq!(fresh.marked_range(), Some((0, 999)));
     }
 
     #[test]

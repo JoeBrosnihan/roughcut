@@ -1154,6 +1154,58 @@ impl RoughcutApp {
             return;
         }
 
+        self.keep_marked();
+    }
+
+    /// Forget the kept stretch the playhead is sitting in.
+    pub fn drop_kept_here(&mut self) {
+        let Some(id) = self.selected_clip else { return };
+        let frame = self.source_frame;
+        let fps = self.project.fps();
+        let Some(dropped) = self
+            .project
+            .clip(id)
+            .and_then(|c| c.highlight_at(frame).map(|at| c.highlights[at]))
+        else {
+            return;
+        };
+        self.edit(|p| p.clip_mut(id).is_some_and(|c| c.unkeep_at(frame).is_some()));
+        self.set_status(
+            format!("dropped {}", format_timecode(dropped.len(), fps)),
+            StatusKind::Info,
+        );
+    }
+
+    /// Clear both marks on the clip on screen.
+    pub fn clear_marks(&mut self) {
+        self.mark(MarkOp::ClearBoth);
+    }
+
+    /// Whether there is a range marked on the clip on screen right now.
+    ///
+    /// A clip with no marks resolves to its whole length, which is a default
+    /// rather than a statement, so it does not count as one.
+    pub fn has_marked_range(&self) -> bool {
+        self.selected_source()
+            .is_some_and(|c| c.mark_in.is_some() || c.mark_out.is_some())
+    }
+
+    /// Keep the marked range as good material.
+    ///
+    /// Split out from `toggle_keep` so the scrub bar's menu can offer it
+    /// directly: right-clicking a range you have just dragged out should
+    /// keep that range, not toggle whatever the playhead happens to be
+    /// sitting in.
+    pub fn keep_marked(&mut self) {
+        let Some(id) = self.selected_clip else {
+            self.set_status("select a clip in the bin first", StatusKind::Warn);
+            return;
+        };
+        let Some(clip) = self.project.clip(id) else {
+            return;
+        };
+        let fps = self.project.fps();
+
         // An unmarked clip resolves to its whole length, which is not a
         // judgement about anything — keeping it would say "all of this is
         // good" on a key pressed by accident.
@@ -1295,24 +1347,34 @@ impl RoughcutApp {
     fn append_marked(&mut self) {
         let ids = self.picked();
         if ids.is_empty() {
-            self.set_status("nothing marked to append", StatusKind::Warn);
+            self.set_status("nothing marked to add", StatusKind::Warn);
             return;
         }
+        let mut at = timeline::nearest_cut(&self.project.timeline, self.playhead);
         let mut clips = 0;
         let mut cuts = 0;
         for id in ids {
-            let added = self.append_clip_parts(id);
+            let (added, next) = self.insert_clip_parts(id, at);
+            at = next;
             if added > 0 {
                 clips += 1;
                 cuts += added;
             }
         }
-        // Worth saying only when one gesture produced several cuts, which is
-        // the case somebody would otherwise have to count on the timeline.
+        if cuts == 0 {
+            self.set_status("nothing there to add", StatusKind::Warn);
+            return;
+        }
+        // Leave the playhead at the end of what was just laid down, so
+        // pressing the key again carries on after it rather than pushing
+        // what was just added further along.
+        self.set_position(at);
+        self.selected_item = timeline::item_at(&self.project.timeline, at.saturating_sub(1))
+            .map(|(i, _)| i);
         if cuts > clips {
             self.set_status(
                 format!(
-                    "appended {cuts} cuts from {clips} clip{}",
+                    "added {cuts} cuts from {clips} clip{}",
                     if clips == 1 { "" } else { "s" }
                 ),
                 StatusKind::Info,
@@ -1320,16 +1382,22 @@ impl RoughcutApp {
         }
     }
 
-    /// Append a specific bin clip to the timeline — the same thing `A` does,
-    /// so double-clicking a tile and pressing `A` agree.
+    /// Add a specific bin clip to the timeline — the same thing `A` does, so
+    /// double-clicking a tile and pressing `A` agree.
     pub fn append_clip(&mut self, id: ClipId) {
-        if self.append_clip_parts(id) == 0 {
+        let at = timeline::nearest_cut(&self.project.timeline, self.playhead);
+        let (added, next) = self.insert_clip_parts(id, at);
+        if added == 0 {
             self.set_status("that clip has no usable range", StatusKind::Warn);
+            return;
         }
+        self.set_position(next);
+        self.selected_item = timeline::item_at(&self.project.timeline, next.saturating_sub(1))
+            .map(|(i, _)| i);
     }
 
-    /// Put a clip on the timeline as the good parts of it, and only fall back
-    /// to the marked range when none have been picked out.
+    /// Put a clip on the timeline at `at`, as the good parts of it, and only
+    /// fall back to the marked range when none have been picked out.
     ///
     /// This is the point of keeping stretches: having decided which parts of
     /// a take are worth using, assembling them should not mean marking them a
@@ -1337,40 +1405,52 @@ impl RoughcutApp {
     /// thing — that gesture says where a clip goes, and a person doing it by
     /// hand has said what they want.
     ///
-    /// Returns how many cuts were added.
-    fn append_clip_parts(&mut self, id: ClipId) -> usize {
-        let highlights: Vec<(i64, i64)> = self
+    /// Returns how many cuts were added, and the frame just past the last of
+    /// them, so a run of clips goes down in order rather than each one
+    /// shoving the last further along.
+    fn insert_clip_parts(&mut self, id: ClipId, at: i64) -> (usize, i64) {
+        let ranges: Vec<(i64, i64)> = self
             .project
             .clip(id)
             .map(|c| {
-                c.highlights
-                    .iter()
-                    .map(|h| (h.in_frame, h.out_frame))
-                    .collect()
+                // A range marked right now wins. Marking one is a live
+                // statement about what is wanted from this clip *this time*;
+                // the kept stretches are a judgement made earlier, and an
+                // earlier judgement should never overrule the thing somebody
+                // has just this moment selected on screen.
+                //
+                // "Marked right now" means at least one mark actually set --
+                // an unmarked clip resolves to its whole length, which is
+                // not a statement about anything.
+                let marked = c.mark_in.is_some() || c.mark_out.is_some();
+                if marked || c.highlights.is_empty() {
+                    c.marked_range().into_iter().collect()
+                } else {
+                    c.highlights
+                        .iter()
+                        .map(|h| (h.in_frame, h.out_frame))
+                        .collect()
+                }
             })
             .unwrap_or_default();
-
-        if highlights.is_empty() {
-            let Some((in_frame, out_frame)) =
-                self.project.clip(id).and_then(|c| c.marked_range())
-            else {
-                return 0;
-            };
-            return usize::from(self.edit(|p| timeline::append(p, id, in_frame, out_frame)));
+        if ranges.is_empty() {
+            return (0, at);
         }
 
         // One edit for the whole clip, so undo takes back the gesture rather
         // than one stretch of it.
         let mut added = 0;
+        let mut cursor = at;
         self.edit(|p| {
-            for (in_frame, out_frame) in &highlights {
-                if timeline::append(p, id, *in_frame, *out_frame) {
+            for (in_frame, out_frame) in &ranges {
+                if timeline::insert_at(p, cursor, id, *in_frame, *out_frame).is_some() {
                     added += 1;
+                    cursor += inclusive_len(*in_frame, *out_frame);
                 }
             }
             added > 0
         });
-        added
+        (added, cursor)
     }
 
     fn insert_marked(&mut self) {

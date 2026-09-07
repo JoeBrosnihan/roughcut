@@ -4,6 +4,7 @@
 //! the timeline at the playhead.
 
 use crate::app::{Focus, MarkEdge, RoughcutApp};
+use roughcut_core::model::ClipId;
 use crate::theme;
 use crate::video::PixelRect;
 use egui::{CornerRadius, Pos2, Rect, Sense, Stroke};
@@ -178,6 +179,23 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some(id) = clip_id {
         app.request_waveform(id);
     }
+    if app.focus == Focus::Timeline {
+        // Every clip the cut uses, once. `request_waveform` is a set lookup
+        // for anything already asked for, so calling it each pass costs
+        // nothing, and the peaks are two kilobytes each and cached on disk.
+        let used: Vec<ClipId> = {
+            let mut seen: Vec<ClipId> = Vec::new();
+            for item in &app.project.timeline {
+                if !seen.contains(&item.clip_id) {
+                    seen.push(item.clip_id);
+                }
+            }
+            seen
+        };
+        for id in used {
+            app.request_waveform(id);
+        }
+    }
 
     let track = Rect::from_min_max(
         egui::pos2(rect.left() + 10.0, rect.top() + TRACK_TOP),
@@ -199,6 +217,53 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
         egui::pos2(track.right(), rect.bottom()),
     );
     let response = ui.interact(hit, ui.id().with("scrub"), Sense::click_and_drag());
+
+    // Right-clicking the bar acts on the range drawn on it. Dragging a range
+    // out and then reaching for a key to keep it is two different kinds of
+    // gesture for one thought; this is the same thought, in one place.
+    if app.focus == Focus::Source && clip_id.is_some() {
+        let marked = app.has_marked_range();
+        let over_kept = app
+            .selected_source()
+            .and_then(|c| c.highlight_at(app.source_frame))
+            .is_some();
+        let mut keep = false;
+        let mut drop = false;
+        let mut clear = false;
+        response.context_menu(|ui| {
+            ui.set_min_width(180.0);
+            ui.add_enabled_ui(marked, |ui| {
+                if ui
+                    .button("Keep as good material")
+                    .on_hover_text("G. Kept stretches are what A lays on the timeline.")
+                    .clicked()
+                {
+                    keep = true;
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+            });
+            if over_kept && ui.button("Drop this stretch").clicked() {
+                drop = true;
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if marked {
+                ui.separator();
+                if ui.button("Clear marks").clicked() {
+                    clear = true;
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+            }
+        });
+        if keep {
+            app.keep_marked();
+        }
+        if drop {
+            app.drop_kept_here();
+        }
+        if clear {
+            app.clear_marks();
+        }
+    }
     let shift = ui.input(|i| i.modifiers.shift);
     let marking = app.focus == Focus::Source && app.selected_clip.is_some();
     let handle_at = |x: f32| -> Option<MarkEdge> {
@@ -292,6 +357,37 @@ fn scrub_bar(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
 
     if let Some(peaks) = clip_id.and_then(|id| app.waveforms.get(&id)) {
         waveform(&painter, track, peaks);
+    }
+
+    // The timeline's sound is every cut's own, each sliced to the part of
+    // its clip that cut actually uses. Drawn before the cut lines, so the
+    // boundaries stay legible on top of it.
+    if app.focus == Focus::Timeline {
+        let mut acc = 0i64;
+        for item in &app.project.timeline {
+            let len = item.len();
+            let span = Rect::from_min_max(
+                egui::pos2(x_of(acc), track.top()),
+                egui::pos2(x_of(acc + len), track.bottom()),
+            );
+            acc += len;
+            let (Some(clip), Some(peaks)) = (
+                app.project.clip(item.clip_id),
+                app.waveforms.get(&item.clip_id),
+            ) else {
+                continue;
+            };
+            // The peaks span the whole clip, so take the window this cut
+            // uses rather than stretching the lot across it.
+            let dur = clip.duration_frames.max(1) as f64;
+            let n = peaks.len();
+            let lo = ((item.in_frame.max(0) as f64 / dur) * n as f64) as usize;
+            let hi = (((item.out_frame + 1) as f64 / dur) * n as f64).ceil() as usize;
+            let (lo, hi) = (lo.min(n), hi.clamp(lo.min(n), n));
+            if hi > lo {
+                waveform(&painter, span, &peaks[lo..hi]);
+            }
+        }
     }
 
     // The stretches already decided about, under everything else: a mark
