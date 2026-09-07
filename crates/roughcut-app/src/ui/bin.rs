@@ -164,7 +164,7 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
                     action = Some(Action::SaveProjectAs);
                 }
                 ui.separator();
-                if menu_item(ui, "Export MLT XML…", "Ctrl+E") {
+                if menu_item(ui, "Export…", "Ctrl+E") {
                     action = Some(Action::ExportMlt);
                 }
                 ui.separator();

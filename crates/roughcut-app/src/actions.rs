@@ -137,7 +137,7 @@ pub const KEY_MAP: &[Section] = &[
             Binding { keys: "Ctrl+S", description: "Save project", scope: Scope::Global },
             Binding { keys: "Ctrl+Shift+S", description: "Save project as", scope: Scope::Global },
             Binding { keys: "Ctrl+I", description: "Import media", scope: Scope::Global },
-            Binding { keys: "Ctrl+E", description: "Export MLT XML", scope: Scope::Global },
+            Binding { keys: "Ctrl+E", description: "Export the cut — a Shotcut project, or a rendered MP4", scope: Scope::Global },
             Binding { keys: "Ctrl+Z / Ctrl+Shift+Z", description: "Undo / redo", scope: Scope::Global },
         ],
     },
