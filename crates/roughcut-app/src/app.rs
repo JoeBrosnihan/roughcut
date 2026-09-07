@@ -1382,6 +1382,37 @@ impl RoughcutApp {
         }
     }
 
+    /// Put sound on the first audio track with room for it, adding a track
+    /// when every one of them is busy at that point.
+    ///
+    /// Layering is the whole reason there is more than one lane: a effect
+    /// over a music bed is two tracks, and having to make the second one by
+    /// hand before the sound will go anywhere is a step that teaches nothing.
+    /// Overwriting the bed instead would be worse.
+    pub fn drop_audio_on_a_free_track(&mut self, clip_id: ClipId, frame: i64) {
+        let Some((in_frame, out_frame)) =
+            self.project.clip(clip_id).and_then(|c| c.marked_range())
+        else {
+            self.set_status("that clip has no usable range", StatusKind::Warn);
+            return;
+        };
+        let to = frame + (out_frame - in_frame);
+        let free = self
+            .project
+            .audio
+            .iter()
+            .position(|t| t.has_room(frame, to));
+
+        let track = match free {
+            Some(t) => t,
+            None => {
+                self.add_audio_track();
+                self.project.audio.len() - 1
+            }
+        };
+        self.drop_audio_at(clip_id, track, frame);
+    }
+
     /// Add a specific bin clip to the timeline — the same thing `A` does, so
     /// double-clicking a tile and pressing `A` agree.
     pub fn append_clip(&mut self, id: ClipId) {
@@ -1411,7 +1442,7 @@ impl RoughcutApp {
     fn insert_clip_parts(&mut self, id: ClipId, at: i64) -> (usize, i64) {
         if self.project.clip(id).is_some_and(|c| c.audio_only) {
             self.set_status(
-                "that is sound — drag it onto an audio track",
+                "that is sound — drag it onto the timeline and it lands on an audio track",
                 StatusKind::Warn,
             );
             return (0, at);
@@ -1484,11 +1515,12 @@ impl RoughcutApp {
     /// nothing is marked — the same range `V` would insert, so dragging and
     /// the keyboard cannot disagree about what a clip means.
     pub fn drop_clip_at(&mut self, clip_id: ClipId, frame: i64) {
+        // Sound dropped anywhere on the timeline goes where sound goes.
+        // Refusing it made no sense: the timeline is the whole panel, audio
+        // lanes included, and a project with no audio track yet has no lane
+        // to aim at, so there was nothing the message could have meant.
         if self.project.clip(clip_id).is_some_and(|c| c.audio_only) {
-            self.set_status(
-                "that is sound — drop it on an audio track, not the timeline",
-                StatusKind::Warn,
-            );
+            self.drop_audio_on_a_free_track(clip_id, frame.max(0));
             return;
         }
         let Some((in_frame, out_frame)) =

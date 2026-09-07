@@ -87,6 +87,15 @@ impl AudioTrack {
         self.items.iter().position(|i| i.covers(frame))
     }
 
+    /// Whether `[from, to]` is clear of everything already on this track.
+    ///
+    /// `place` overwrites what it lands on, which is right when somebody
+    /// aimed at a lane, and wrong when nobody did -- so dropping sound on
+    /// the timeline asks this first and picks a track that is actually free.
+    pub fn has_room(&self, from: i64, to: i64) -> bool {
+        !self.items.iter().any(|i| i.overlaps(from, to))
+    }
+
     /// Put `item` on the track, overwriting whatever it lands on.
     ///
     /// Overwrite rather than refuse, because dropping a sound onto a spot is
@@ -233,6 +242,26 @@ pub fn mix_args(pieces: &[MixPiece], dest: &std::path::Path) -> Option<Vec<std::
 
 #[cfg(test)]
 mod tests {
+
+    /// What "is this lane free here?" has to answer for layering to work.
+    #[test]
+    fn a_track_knows_whether_a_span_is_clear() {
+        let mut t = AudioTrack::new("A1");
+        let c = ClipId::new();
+        // A bed from 100 to 199.
+        t.place(AudioItem { clip_id: c, in_frame: 0, out_frame: 99, start: 100 });
+
+        assert!(!t.has_room(150, 250), "overlapping the tail");
+        assert!(!t.has_room(50, 120), "overlapping the head");
+        assert!(!t.has_room(120, 130), "entirely inside");
+        assert!(!t.has_room(50, 250), "swallowing it whole");
+        // Touching but not overlapping is room: 0..99 then 200..299.
+        assert!(t.has_room(0, 99));
+        assert!(t.has_room(200, 299));
+        // An empty track always has room.
+        assert!(AudioTrack::new("A2").has_room(100, 199));
+    }
+
     use super::*;
 
     fn item(start: i64, len: i64) -> AudioItem {
