@@ -287,8 +287,12 @@ PAGE = r"""<!doctype html>
          padding-bottom:calc(18px + env(safe-area-inset-bottom)); }
   .wrap { max-width:620px; margin:0 auto; }
 
-  header { position:sticky; top:0; z-index:6; background:var(--panel);
-           border-bottom:1px solid var(--line);
+  /* The header and the video are one pinned block. Sticky elements that
+     each claim top:0 separately fight over which is in front; this way
+     there is nothing to resolve, and the z-index only has to beat the
+     positioned elements further down the page. */
+  .top { position:sticky; top:0; z-index:10; background:var(--bg); }
+  header { background:var(--panel); border-bottom:1px solid var(--line);
            padding:calc(8px + env(safe-area-inset-top)) 12px 8px; }
   .titles { display:flex; align-items:baseline; justify-content:space-between;
             gap:6px 10px; flex-wrap:wrap; min-width:0; }
@@ -306,7 +310,7 @@ PAGE = r"""<!doctype html>
           inset:6px 2px auto; height:1px; background:var(--dim); }
   .cell[data-current="1"] { box-shadow:inset 0 0 0 2px var(--accent); }
 
-  .stage { background:#000; position:sticky; top:0; }
+  .stage { background:#000; }
   video { width:100%; display:block; background:#000; max-height:52vh; }
   .missing { padding:30px 12px; text-align:center; color:var(--dim); font-size:13px; }
 
@@ -406,6 +410,7 @@ PAGE = r"""<!doctype html>
   .status[data-kind="error"] { border-left-color:var(--error); color:var(--text); }
 </style></head><body>
 <div class="wrap">
+  <div class="top">
   <header>
     <div class="titles">
       <span class="project" id="project">—</span>
@@ -417,6 +422,7 @@ PAGE = r"""<!doctype html>
   <div class="stage">
     <video id="v" controls playsinline preload="metadata"></video>
     <div class="missing" id="missing" hidden>No phone copy of this clip yet.</div>
+  </div>
   </div>
 
   <main class="clip" id="clip">
