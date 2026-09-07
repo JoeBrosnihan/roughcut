@@ -319,9 +319,6 @@ PAGE = r"""<!doctype html>
           font-size:13px; margin-bottom:8px; }
   .name .index { color:var(--dim); font-variant-numeric:tabular-nums; }
   .name .len { margin-left:auto; color:var(--dim); font-variant-numeric:tabular-nums; }
-  .badge { font-family:var(--ui); font-size:10px; font-weight:600;
-           letter-spacing:.08em; text-transform:uppercase; padding:2px 6px;
-           border:1px solid var(--dim); color:var(--dim); border-radius:2px; }
   .archived .name { color:var(--dim); }
 
   /* The same shape as the scrub bar under the monitor in the window:
@@ -378,8 +375,6 @@ PAGE = r"""<!doctype html>
   .keeps .of { color:var(--dim); margin-left:auto; }
   .keeps .drop { flex:0 0 auto; min-height:0; padding:2px 8px; font-size:15px;
               line-height:1.2; background:none; border:0; color:var(--dim); }
-  .none { font-size:13px; color:var(--dim); background:var(--panel);
-          border:1px dashed var(--line); padding:12px; text-align:center; }
 
   /* What was said, under the decisions about it. Whisper gives words with
      the frame each is spoken on, so a line is a seek target as well as
@@ -389,7 +384,6 @@ PAGE = r"""<!doctype html>
   .script h2 { font-size:11px; font-weight:600; letter-spacing:.08em;
                text-transform:uppercase; color:var(--dim); margin:0 0 6px;
                display:flex; gap:8px; align-items:baseline; }
-  .script h2 .count { color:var(--line); font-family:var(--mono); }
   .script ol { list-style:none; margin:0; padding:0; }
   .script li { display:flex; gap:10px; padding:9px 10px; cursor:pointer;
                border-bottom:1px solid var(--line); align-items:baseline; }
@@ -403,11 +397,12 @@ PAGE = r"""<!doctype html>
   .script li.claimed .at { color:var(--keep-lit); }
   .script .said { flex:1 1 auto; min-width:0; font-size:15px; }
 
-  .status { margin:14px 12px 0; padding:9px 11px; font-size:12px; color:var(--dim);
-            background:var(--panel); border:1px solid var(--line);
-            border-left:3px solid var(--line); overflow-wrap:anywhere; }
-  .status[data-kind="ok"] { border-left-color:var(--keep); }
-  .status[data-kind="error"] { border-left-color:var(--error); color:var(--text); }
+  /* Shown only when something failed, and gone the moment it stops being
+     true -- so it costs nothing at rest. */
+  .status { margin:14px 12px 0; padding:9px 11px; font-size:13px;
+            color:var(--text); background:var(--panel);
+            border:1px solid var(--line); border-left:3px solid var(--error);
+            overflow-wrap:anywhere; }
 </style></head><body>
 <div class="wrap">
   <div class="top">
@@ -429,7 +424,6 @@ PAGE = r"""<!doctype html>
     <div class="name">
       <span class="index" id="index"></span>
       <span id="filename">—</span>
-      <span class="badge" id="badge" hidden>Archived</span>
       <span class="len" id="length"></span>
     </div>
 
@@ -437,10 +431,10 @@ PAGE = r"""<!doctype html>
       <div class="hint" id="hint">Drag across to choose a stretch</div>
       <div class="head" id="head" style="left:0"></div>
     </div>
-    <div class="readout">
-      <span class="span" id="span">&nbsp;</span>
+    <div class="readout" id="readout" hidden>
+      <span class="span" id="span"></span>
       <span class="dur" id="dur"></span>
-      <button class="x" id="clear" hidden aria-label="Discard this stretch">&times;</button>
+      <button class="x" id="clear" aria-label="Discard this stretch">&times;</button>
     </div>
 
     <div class="row">
@@ -452,20 +446,18 @@ PAGE = r"""<!doctype html>
       <button id="next">Next ›</button>
     </div>
 
-    <section class="script">
-      <h2>Transcript <span class="count" id="scriptCount"></span></h2>
-      <ol id="script"></ol>
-      <div class="none" id="scriptNone">No transcript for this clip.</div>
-    </section>
-
-    <section class="keeps">
+    <section class="keeps" id="keepsSection" hidden>
       <h2 id="keepsTitle">Kept stretches</h2>
       <ul id="keepList"></ul>
-      <div class="none" id="keepNone">Nothing kept in this clip yet.</div>
+    </section>
+
+    <section class="script" id="scriptSection" hidden>
+      <h2>Transcript</h2>
+      <ol id="script"></ol>
     </section>
   </main>
 
-  <p class="status" id="status">Loading the bin…</p>
+  <p class="status" id="status" hidden></p>
 </div>
 
 <script>
@@ -475,13 +467,10 @@ PAGE = r"""<!doctype html>
   var $ = function (id) { return document.getElementById(id); };
   var v = $("v");
 
-  function tc(f) {
-    f = Math.max(0, Math.round(f));
-    var t = Math.floor(f / FPS), ff = Math.round(f - t * FPS);
-    var s = t % 60, m = Math.floor(t / 60) % 60, h = Math.floor(t / 3600);
-    var p = function (n) { return (n < 10 ? "0" : "") + n; };
-    return (h ? p(h) + ":" : "") + p(m) + ":" + p(s) + ":" + p(ff);
-  }
+  // Frames stay the unit -- every position sent to the server is a frame
+  // number, and the project stores frames -- but a second is the finest
+  // thing shown. A frame is imperceptible at a glance, so displaying one
+  // is precision nobody can act on and everybody has to read past.
   // Minutes, to one decimal: "3.5m". A running total is a sense of scale,
   // not a cue point -- nobody needs it to the frame, and m:ss invites you
   // to read it as one.
@@ -493,9 +482,12 @@ PAGE = r"""<!doctype html>
     var t = Math.round(f / FPS);
     return Math.floor(t / 60) + ":" + (t % 60 < 10 ? "0" : "") + (t % 60);
   }
-  function status(t, kind) {
-    $("status").textContent = t;
-    $("status").setAttribute("data-kind", kind || "");
+  // Failures only. Anything else clears it: a later success means whatever
+  // went wrong is no longer the state of things.
+  function status(t) {
+    var el = $("status");
+    el.textContent = t || "";
+    el.hidden = !t;
   }
   function clip() { return S.clips[at]; }
   // The playhead is the video's own clock, so a frame number always means
@@ -530,14 +522,11 @@ PAGE = r"""<!doctype html>
       d2.style.left = (100 * a / last) + "%";
       d2.style.width = "max(3px," + (100 * (b - a) / last) + "%)";
       bar.insertBefore(d2, $("head"));
-      $("span").textContent = tc(a) + " → " + tc(b);
-      $("dur").textContent = "+" + tc(b - a + 1);
-    } else {
-      $("span").innerHTML = "&nbsp;";
-      $("dur").textContent = "";
+      $("span").textContent = mmss(a) + " → " + mmss(b);
+      $("dur").textContent = "+" + mmss(b - a + 1);
     }
+    $("readout").hidden = !sel;
     $("keep").disabled = !sel;
-    $("clear").hidden = !sel;
     $("hint").hidden = !!sel || c.hi.length > 0;
   }
 
@@ -569,7 +558,6 @@ PAGE = r"""<!doctype html>
     $("filename").textContent = c.name;
     $("length").textContent = mmss(c.frames);
     $("clip").classList.toggle("archived", c.arch);
-    $("badge").hidden = !c.arch;
     $("archive").textContent = c.arch ? "Restore" : "Archive";
     $("archive").classList.toggle("on", c.arch);
     $("prev").disabled = at === 0;
@@ -588,31 +576,29 @@ PAGE = r"""<!doctype html>
     c.hi.forEach(function (h, i) {
       var li = document.createElement("li");
       var span = document.createElement("span");
-      span.textContent = tc(h[0]) + " → " + tc(h[1]);
+      span.textContent = mmss(h[0]) + " → " + mmss(h[1]);
       var of = document.createElement("span");
       of.className = "of";
-      of.textContent = tc(h[1] - h[0] + 1);
+      of.textContent = mmss(h[1] - h[0] + 1);
       li.title = "Play this stretch";
       li.onclick = function () { v.currentTime = h[0] / FPS; v.play(); };
       var drop = document.createElement("button");
       drop.className = "drop"; drop.innerHTML = "&times;";
-      drop.setAttribute("aria-label", "Drop the stretch at " + tc(h[0]));
+      drop.setAttribute("aria-label", "Drop the stretch at " + mmss(h[0]));
       drop.onclick = function (e) {
         e.stopPropagation();          // the row plays; the cross removes
         send("/drop", { clip: c.id, index: i }).then(function (r) {
-          c.hi = r.hi; render(); paintScript();
-          status("Dropped — written to the project.", "ok");
-        }).catch(function (e2) { status("Could not drop that: " + e2.message, "error"); });
+          c.hi = r.hi; render(); paintScript(); status(null);
+        }).catch(function (e2) { status("Could not drop that: " + e2.message); });
       };
       li.appendChild(span); li.appendChild(of); li.appendChild(drop);
       list.appendChild(li);
     });
-    $("keepNone").hidden = c.hi.length > 0;
     var clipFrames = 0;
     c.hi.forEach(function (h) { clipFrames += h[1] - h[0] + 1; });
-    $("keepsTitle").textContent = c.hi.length
-      ? "Kept stretches \u00b7 " + mmss(clipFrames) + " of " + mmss(c.frames)
-      : "Kept stretches";
+    $("keepsSection").hidden = !c.hi.length;
+    $("keepsTitle").textContent =
+      "Kept stretches \u00b7 " + mmss(clipFrames) + " of " + mmss(c.frames);
     paintBar(); paintHead(); paintRail();
   }
 
@@ -645,22 +631,15 @@ PAGE = r"""<!doctype html>
     script = [];
     activeLine = -1;
     $("script").textContent = "";
-    $("scriptCount").textContent = "";
-    $("scriptNone").textContent = "Reading the transcript…";
-    $("scriptNone").hidden = false;
+    $("scriptSection").hidden = true;
     fetch("/transcript/" + c.id).then(function (r) { return r.json(); })
       .then(function (d) {
         if (scriptFor !== c.id) return;      // moved on while it loaded
         script = d.lines || [];
-        $("scriptNone").textContent = d.available
-          ? "Nothing was said in this clip."
-          : "No transcript for this clip yet.";
         paintScript();
       })
       .catch(function () {
-        if (scriptFor !== c.id) return;
-        $("scriptNone").textContent = "Could not read the transcript.";
-        $("scriptNone").hidden = false;
+        if (scriptFor === c.id) status("Could not read the transcript.");
       });
   }
 
@@ -671,8 +650,9 @@ PAGE = r"""<!doctype html>
   function paintScript() {
     var ol = $("script");
     ol.textContent = "";
-    $("scriptNone").hidden = script.length > 0;
-    $("scriptCount").textContent = script.length ? script.length + " lines" : "";
+    // A clip nobody spoke in has no transcript to head, so the whole
+    // section goes rather than announcing its own emptiness.
+    $("scriptSection").hidden = !script.length;
     script.forEach(function (line, i) {
       var li = document.createElement("li");
       li.dataset.i = i;
@@ -767,18 +747,16 @@ PAGE = r"""<!doctype html>
   $("keep").onclick = function () {
     var c = clip();
     send("/keep", { clip: c.id, in: sel[0], out: sel[1] }).then(function (r) {
-      c.hi = r.hi; sel = null; render(); paintScript();
-      status("Kept — written to " + S.project + ".roughcut.", "ok");
-    }).catch(function (e) { status("Could not save that: " + e.message, "error"); });
+      c.hi = r.hi; sel = null; render(); paintScript(); status(null);
+    }).catch(function (e) { status("Could not keep that: " + e.message); });
   };
 
   $("archive").onclick = function () {
     var c = clip(), want = !c.arch;
     send("/archive", { clip: c.id, archived: want }).then(function () {
-      c.arch = want; render();
-      status((want ? "Archived " : "Restored ") + c.name + ".", "ok");
+      c.arch = want; render(); status(null);
       if (want && at < S.clips.length - 1) setTimeout(function () { go(at + 1); }, 200);
-    }).catch(function (e) { status("Could not save that: " + e.message, "error"); });
+    }).catch(function (e) { status("Could not archive that: " + e.message); });
   };
 
   $("prev").onclick = function () { go(at - 1); };
@@ -798,11 +776,7 @@ PAGE = r"""<!doctype html>
     });
     render();
     loadScript();
-    var missing = s.clips.filter(function (c) { return !c.ready; }).length;
-    status(missing
-      ? "Every decision is written straight into the project. " + missing + " clip(s) have no phone copy yet."
-      : "Every decision is written straight into the project on this machine.", "ok");
-  }).catch(function (e) { status("Could not load the bin: " + e.message, "error"); });
+  }).catch(function (e) { status("Could not load the bin: " + e.message); });
 })();
 </script></body></html>
 """
