@@ -140,6 +140,7 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     let mut toggle_ripple: Option<bool> = None;
     let mut toggle_archived: Option<bool> = None;
     let mut add_audio = false;
+    let mut paste_image = false;
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.horizontal_centered(|ui| {
@@ -151,6 +152,14 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
                 }
                 if menu_item(ui, "Import media…", "Ctrl+I") {
                     action = Some(Action::Import);
+                }
+                // A screenshot is the one source that arrives without being
+                // a file first. Here as well as on Ctrl+V because the key is
+                // the sort of thing that gets intercepted, and a feature
+                // reachable only by a shortcut somebody has to be told about
+                // is not reachable.
+                if menu_item(ui, "Paste image", "Ctrl+V") {
+                    paste_image = true;
                 }
                 ui.separator();
                 if menu_item(ui, "Open project…", "Ctrl+O") {
@@ -259,6 +268,9 @@ fn header(app: &mut RoughcutApp, ui: &mut egui::Ui) {
     }
     if add_audio {
         app.add_audio_track();
+    }
+    if paste_image {
+        app.paste_image();
     }
     if recover {
         app.recover_last_session();

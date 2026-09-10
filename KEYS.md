@@ -60,6 +60,7 @@ act on whichever region currently has focus; press `Tab` to switch.
 | `Ctrl+S` | Save project | Any |
 | `Ctrl+Shift+S` | Save project as | Any |
 | `Ctrl+I` | Import media | Any |
+| `Ctrl+V` | Paste a picture from the clipboard into the bin, as a file beside the project | Source |
 | `Ctrl+E` | Export the cut — a Shotcut project, or a rendered MP4 | Any |
 | `Ctrl+Z / Ctrl+Shift+Z` | Undo / redo | Any |
 

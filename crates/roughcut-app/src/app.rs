@@ -948,6 +948,18 @@ impl RoughcutApp {
         }
     }
 
+    /// Put the playhead just past something added to the timeline.
+    ///
+    /// Always the playhead, whatever has focus: a clip added from the bin is
+    /// a change to the cut, and the next one belongs after it. Clamped to
+    /// the timeline, so the last cut added leaves the playhead on its final
+    /// frame rather than one past the end.
+    fn move_playhead_after(&mut self, frame: i64) {
+        self.playhead = frame
+            .max(0)
+            .min(timeline::last_frame(&self.project.timeline));
+    }
+
     pub fn set_position(&mut self, frame: i64) {
         let frame = frame.clamp(0, self.position_max());
         match self.focus {
@@ -1034,7 +1046,17 @@ impl RoughcutApp {
 
             Action::Copy => self.copy_selection(false),
             Action::Cut => self.copy_selection(true),
-            Action::Paste => self.paste(),
+            Action::Paste => {
+                // In the bin, Ctrl+V means the picture on the clipboard; on
+                // the timeline it means the range that was copied.
+                if self.focus == Focus::Source
+                    && crate::clipboard::image_from_clipboard().is_some()
+                {
+                    self.paste_image();
+                } else {
+                    self.paste();
+                }
+            }
             Action::Split => self.split(),
             // Delete removes whatever is in the region you are looking at.
             Action::RippleDelete => match self.focus {
@@ -1395,7 +1417,11 @@ impl RoughcutApp {
         // Leave the playhead at the end of what was just laid down, so
         // pressing the key again carries on after it rather than pushing
         // what was just added further along.
-        self.set_position(at);
+        //
+        // The playhead directly, not `set_position`: that moves whichever
+        // position has focus, and `A` is pressed from the bin — so it moved
+        // the source frame and left the playhead where it was.
+        self.move_playhead_after(at);
         self.selected_item = timeline::item_at(&self.project.timeline, at.saturating_sub(1))
             .map(|(i, _)| i);
         if cuts > clips {
@@ -1450,7 +1476,7 @@ impl RoughcutApp {
             self.set_status("that clip has no usable range", StatusKind::Warn);
             return;
         }
-        self.set_position(next);
+        self.move_playhead_after(next);
         self.selected_item = timeline::item_at(&self.project.timeline, next.saturating_sub(1))
             .map(|(i, _)| i);
     }
@@ -2505,6 +2531,69 @@ impl RoughcutApp {
             self.settings.save();
         }
         self.import_paths(files);
+    }
+
+    /// Take the picture on the clipboard into the bin.
+    ///
+    /// It is written out as a real file first. A bin clip is a path, an
+    /// export references paths, and a project reopened tomorrow has to find
+    /// its media — a picture living only in the clipboard could satisfy none
+    /// of that. So this is an import like any other, of a file that happens
+    /// to have been made a moment ago.
+    ///
+    /// The files go in `pasted/` beside the project, visibly rather than in
+    /// a cache: they are source material now, and moving the project has to
+    /// move them too.
+    pub fn paste_image(&mut self) {
+        let Some(image) = crate::clipboard::image_from_clipboard() else {
+            self.set_status("no picture on the clipboard", StatusKind::Warn);
+            return;
+        };
+        let Some(dir) = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.join("pasted"))
+        else {
+            // The same rule proxies follow: a file needs somewhere to live,
+            // and an unsaved project has nowhere.
+            self.set_status(
+                "save the project first, so a pasted picture has somewhere to live",
+                StatusKind::Warn,
+            );
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_status(format!("cannot create {}: {e}", dir.display()), StatusKind::Error);
+            return;
+        }
+
+        // Numbered rather than stamped with the time: these sit in a folder
+        // somebody will open, and `pasted-3.png` is a name, where an epoch
+        // second is a receipt.
+        let mut n = 1;
+        let path = loop {
+            let candidate = dir.join(format!("pasted-{n}.png"));
+            if !candidate.exists() {
+                break candidate;
+            }
+            n += 1;
+            if n > 9999 {
+                self.set_status("too many pasted pictures in that folder", StatusKind::Error);
+                return;
+            }
+        };
+
+        // PNG, because what arrives on a clipboard is nearly always a
+        // screenshot, and re-encoding a screenshot lossily to save a few
+        // kilobytes would be a poor trade.
+        let (w, h) = image.dimensions();
+        if let Err(e) = image.save(&path) {
+            self.set_status(format!("cannot write {}: {e}", path.display()), StatusKind::Error);
+            return;
+        }
+        log::info!("pasted {w}x{h} picture to {}", path.display());
+        self.import_paths(vec![path]);
     }
 
     pub fn import_paths(&mut self, paths: Vec<PathBuf>) {
@@ -3760,6 +3849,17 @@ impl eframe::App for RoughcutApp {
             self.check_for_an_edit_elsewhere();
         }
         self.was_focused = focused;
+
+        // Ctrl+V never reaches the action map: egui-winit intercepts it,
+        // looks for text, and returns whether or not it found any, so a
+        // clipboard holding only a screenshot produces no event at all.
+        // Asked every pass so the edge it reports covers just this one, and
+        // only acted on while the window has focus and the bin is where the
+        // keys are going.
+        let chord = crate::clipboard::paste_chord_pressed();
+        if chord && focused && self.focus == Focus::Source {
+            self.paste_image();
+        }
 
         // Where a slow pass went. The application is meant to be invisible
         // between keypresses, so a pass long enough to feel is a defect, and
