@@ -19,13 +19,14 @@
          padding-bottom:calc(18px + env(safe-area-inset-bottom)); }
   .wrap { max-width:620px; margin:0 auto; }
 
-  /* The header and the video are one pinned block. Sticky elements that
-     each claim top:0 separately fight over which is in front; this way
-     there is nothing to resolve, and the z-index only has to beat the
-     positioned elements further down the page. */
-  .top { position:sticky; top:0; z-index:10; background:var(--bg); }
+  /* Only the picture is pinned. The name, the tally and the rail sit
+     directly under it and scroll away with everything else: they are
+     worth a glance at the top, not a permanent slice of a phone screen
+     while reading a transcript at the bottom. */
+  .top { position:sticky; top:0; z-index:10; background:var(--bg);
+         padding-top:env(safe-area-inset-top); }
   header { background:var(--panel); border-bottom:1px solid var(--line);
-           padding:calc(8px + env(safe-area-inset-top)) 12px 8px; }
+           padding:8px 12px; }
   .titles { display:flex; align-items:baseline; justify-content:space-between;
             gap:6px 10px; flex-wrap:wrap; min-width:0; }
   .project { min-width:0; font-size:13px; font-weight:600; letter-spacing:.06em;
@@ -142,6 +143,13 @@
 </style></head><body>
 <div class="wrap">
   <div class="top">
+  <div class="stage">
+    <video id="v" controls playsinline preload="metadata"></video>
+    <div class="missing" id="missing" hidden>Nothing here a phone can play.</div>
+    <div class="source" id="source" hidden></div>
+  </div>
+  </div>
+
   <header>
     <div class="titles">
       <span class="project" id="project">—</span>
@@ -149,13 +157,6 @@
     </div>
     <div class="rail" id="rail"></div>
   </header>
-
-  <div class="stage">
-    <video id="v" controls playsinline preload="metadata"></video>
-    <div class="missing" id="missing" hidden>Nothing here a phone can play.</div>
-    <div class="source" id="source" hidden></div>
-  </div>
-  </div>
 
   <main class="clip" id="clip">
     <div class="name">
