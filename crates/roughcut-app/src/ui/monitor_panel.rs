@@ -3,6 +3,7 @@
 //! The monitor shows the selected bin clip, or — when the timeline has focus —
 //! the timeline at the playhead.
 
+use crate::actions::Action;
 use crate::app::{Focus, MarkEdge, RoughcutApp};
 use roughcut_core::model::ClipId;
 use crate::theme;
@@ -48,6 +49,15 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
 }
 
 fn video(app: &mut RoughcutApp, ui: &mut egui::Ui, rect: Rect) {
+    // Clicking the picture plays and pauses it, exactly as Space does — the
+    // same action, so it restarts from the top at the end of a clip too.
+    if ui
+        .interact(rect, ui.id().with("video"), Sense::click())
+        .clicked()
+    {
+        app.dispatch(Action::TogglePlay);
+    }
+
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::ZERO, theme::VIDEO_LETTERBOX);
 

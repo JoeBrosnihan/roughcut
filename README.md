@@ -26,13 +26,13 @@ Drop files on the window, or press `Ctrl+I`. The whole loop is three keys:
 | `O` | mark where it ends |
 | `A` | append it to the timeline |
 
-Then repeat. `Space` plays, `←` `→` step a frame, `Tab` moves between source and
-timeline. `S` splits, `X` deletes and closes the gap — Shotcut's keys. `T` reads
-the clip instead: select a sentence and `A` cuts exactly that to the timeline.
-Hover a thumbnail to skim it; middle-click to flag one. Drag clips onto the
-timeline, along it to reorder, or by an edge to retrim; drag the ruler to scrub
-and middle-drag to pan. Right-click a clip to rotate one shot sideways.
-**Press `?` for the full keyboard map**, or read [KEYS.md](KEYS.md).
+Then repeat. `Space` or a click on the picture plays, `←` `→` step a frame,
+`Tab` moves between source and timeline. `S` splits, `X` deletes and closes the
+gap — Shotcut's keys. `T` reads the clip instead: select a sentence and `A` cuts
+exactly that to the timeline. Hover a thumbnail to skim it; middle-click to flag
+one. Drag clips onto the timeline, along it to reorder, or by an edge to retrim;
+drag the ruler to scrub and middle-drag to pan. Right-click a clip to rotate one
+shot sideways. **Press `?` for the full keyboard map**, or read [KEYS.md](KEYS.md).
 
 `Ctrl+E` exports, sized and timed from the clips you used: a `.mlt` to finish
 in Shotcut, or an MP4 straight out. Your work saves itself and survives a crash.
