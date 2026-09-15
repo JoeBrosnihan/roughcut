@@ -16,25 +16,75 @@ use std::path::{Path, PathBuf};
 /// Vertical resolution of generated proxies.
 pub const PROXY_HEIGHT: u32 = 540;
 
+/// Vertical resolution of the copies a phone is sent.
+///
+/// Enough to judge a face by, and small enough to seek over a tailnet. The
+/// same frame-exactness rule applies — it is the rate that matters for
+/// marking, not the size — so a stretch kept on the phone is the same frames
+/// as one kept in the window.
+pub const PHONE_HEIGHT: u32 = 270;
+
 /// Frames between keyframes in a proxy — about half a second at any ordinary
 /// rate. Seeking, not file size, is what a proxy is for.
 const GOP: u32 = 15;
 
+/// Which proxy: the one the window edits from, or the one a phone plays.
+///
+/// Both live in the same directory and are made by the same code; they
+/// differ in size, in how much sound is worth carrying, and in the file name
+/// that tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tier {
+    Edit,
+    Phone,
+}
+
+impl Tier {
+    pub fn height(self) -> u32 {
+        match self {
+            Tier::Edit => PROXY_HEIGHT,
+            Tier::Phone => PHONE_HEIGHT,
+        }
+    }
+
+    /// Where this tier's finished proxy for a clip lives.
+    pub fn path(self, proxy_dir: &Path, id: ClipId) -> PathBuf {
+        match self {
+            Tier::Edit => proxy_dir.join(format!("{id}.mp4")),
+            Tier::Phone => proxy_dir.join(format!("{id}.{PHONE_HEIGHT}.mp4")),
+        }
+    }
+
+    /// Where it is written while being transcoded and verified. Only a
+    /// finished, checked proxy is renamed to [`Tier::path`], so a file at the
+    /// final name is always complete — which is what lets a session, or a
+    /// phone, adopt one by existence alone instead of re-probing first.
+    pub fn partial_path(self, proxy_dir: &Path, id: ClipId) -> PathBuf {
+        match self {
+            Tier::Edit => proxy_dir.join(format!("{id}.part.mp4")),
+            Tier::Phone => proxy_dir.join(format!("{id}.{PHONE_HEIGHT}.part.mp4")),
+        }
+    }
+}
+
 pub fn proxy_path(proxy_dir: &Path, id: ClipId) -> PathBuf {
-    proxy_dir.join(format!("{id}.mp4"))
+    Tier::Edit.path(proxy_dir, id)
 }
 
-/// Where a proxy is written while it is being transcoded and verified. Only a
-/// finished, checked proxy is renamed to [`proxy_path`], so a file at the
-/// final name is always complete — which is what lets a session adopt one by
-/// existence alone instead of re-probing the whole bin first.
 pub fn partial_path(proxy_dir: &Path, id: ClipId) -> PathBuf {
-    proxy_dir.join(format!("{id}.part.mp4"))
+    Tier::Edit.partial_path(proxy_dir, id)
 }
 
-/// The exact command line from §10.
-pub fn proxy_args(source: &Path, dest: &Path) -> Vec<std::ffi::OsString> {
-    vec![
+/// The exact command line from §10, at the tier's size.
+pub fn proxy_args(source: &Path, dest: &Path, tier: Tier) -> Vec<std::ffi::OsString> {
+    let height = tier.height();
+    // Speech is what a phone review listens for, and 32 kbit/s of mono is
+    // plenty for that; the window keeps the full mix.
+    let audio_bitrate = match tier {
+        Tier::Edit => "128k",
+        Tier::Phone => "32k",
+    };
+    let mut args: Vec<std::ffi::OsString> = vec![
         "-y".into(),
         "-v".into(),
         "error".into(),
@@ -45,9 +95,14 @@ pub fn proxy_args(source: &Path, dest: &Path) -> Vec<std::ffi::OsString> {
         "-i".into(),
         source.as_os_str().to_os_string(),
         "-vf".into(),
-        format!("scale=-2:{PROXY_HEIGHT}").into(),
+        format!("scale=-2:{height}").into(),
         "-c:v".into(),
         "libx264".into(),
+        // Eight-bit 4:2:0 whatever the source. Phone footage is ten-bit HEVC,
+        // and x264 would faithfully keep that — into a High 10 stream no phone
+        // browser will play. The window does not care either way.
+        "-pix_fmt".into(),
+        "yuv420p".into(),
         "-preset".into(),
         "veryfast".into(),
         "-crf".into(),
@@ -66,11 +121,18 @@ pub fn proxy_args(source: &Path, dest: &Path) -> Vec<std::ffi::OsString> {
         "-c:a".into(),
         "aac".into(),
         "-b:a".into(),
-        "128k".into(),
+        audio_bitrate.into(),
+    ];
+    if tier == Tier::Phone {
+        args.push("-ac".into());
+        args.push("1".into());
+    }
+    args.extend([
         "-movflags".into(),
         "+faststart".into(),
         dest.as_os_str().to_os_string(),
-    ]
+    ]);
+    args
 }
 
 /// Why a generated proxy was thrown away.
@@ -120,10 +182,11 @@ pub fn generate(
     clip: &SourceClip,
     source_info: &MediaInfo,
     proxy_dir: &Path,
+    tier: Tier,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(proxy_dir)
         .with_context(|| format!("cannot create proxy directory {}", proxy_dir.display()))?;
-    let dest = proxy_path(proxy_dir, clip.id);
+    let dest = tier.path(proxy_dir, clip.id);
 
     // A proxy that is already there and still matches its source is adopted
     // rather than rebuilt. Without this, reopening a project re-transcodes
@@ -143,11 +206,11 @@ pub fn generate(
     // Transcode somewhere else and rename only once verified. Writing
     // straight to `dest` meant a crash mid-transcode left a half-written file
     // at the final name, and anything trusting the name would play garbage.
-    let part = partial_path(proxy_dir, clip.id);
+    let part = tier.partial_path(proxy_dir, clip.id);
     let _ = std::fs::remove_file(&part);
     let output = crate::tools::run(
         "proxy",
-        background_command(ffmpeg).args(proxy_args(&clip.path, &part)),
+        background_command(ffmpeg).args(proxy_args(&clip.path, &part, tier)),
     )
     .with_context(|| format!("failed to run ffmpeg at {}", ffmpeg.display()))?;
     if !output.status.success() {
@@ -225,18 +288,47 @@ mod tests {
         assert!(matches!(e, ProxyReject::FrameRateMismatch { .. }));
     }
 
-    #[test]
-    fn command_line_never_forces_a_frame_rate() {
-        let args = proxy_args(Path::new("/in.mp4"), Path::new("/out.mp4"));
-        let joined: Vec<String> = args
+    fn joined(tier: Tier) -> Vec<String> {
+        proxy_args(Path::new("/in.mp4"), Path::new("/out.mp4"), tier)
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            !joined.iter().any(|a| a == "-r"),
-            "-r would resample and break the 1:1 frame mapping: {joined:?}"
-        );
-        assert!(joined.contains(&"scale=-2:540".to_string()));
-        assert!(joined.contains(&"veryfast".to_string()));
+            .collect()
+    }
+
+    #[test]
+    fn command_line_never_forces_a_frame_rate() {
+        for tier in [Tier::Edit, Tier::Phone] {
+            let joined = joined(tier);
+            assert!(
+                !joined.iter().any(|a| a == "-r"),
+                "-r would resample and break the 1:1 frame mapping: {joined:?}"
+            );
+            assert!(
+                !joined.iter().any(|a| a.contains("fps=")),
+                "an fps filter resamples just as surely as -r: {joined:?}"
+            );
+            assert!(joined.contains(&"veryfast".to_string()));
+        }
+        assert!(joined(Tier::Edit).contains(&"scale=-2:540".to_string()));
+        assert!(joined(Tier::Phone).contains(&"scale=-2:270".to_string()));
+    }
+
+    #[test]
+    fn a_phone_proxy_is_eight_bit_and_mono() {
+        let phone = joined(Tier::Phone);
+        // Ten-bit HEVC in, High 10 out, and iOS Safari shows a black box.
+        assert!(phone.contains(&"yuv420p".to_string()));
+        let ac = phone.iter().position(|a| a == "-ac").expect("-ac");
+        assert_eq!(phone[ac + 1], "1");
+        assert!(!joined(Tier::Edit).contains(&"-ac".to_string()));
+    }
+
+    #[test]
+    fn the_two_tiers_never_share_a_file_name() {
+        let dir = Path::new("/p");
+        let id = ClipId::new();
+        assert_ne!(Tier::Edit.path(dir, id), Tier::Phone.path(dir, id));
+        assert_ne!(Tier::Edit.partial_path(dir, id), Tier::Phone.partial_path(dir, id));
+        assert_eq!(proxy_path(dir, id), Tier::Edit.path(dir, id));
     }
 }

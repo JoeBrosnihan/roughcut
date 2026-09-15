@@ -18,6 +18,7 @@ use roughcut_core::mlt::{self, ExportOptions};
 use roughcut_core::model::{ClipId, Project, TimelineItem};
 use roughcut_core::probe::MediaInfo;
 use roughcut_core::project_io;
+use roughcut_core::proxy;
 use roughcut_core::rotate::Turn;
 use roughcut_core::time::{format_timecode, inclusive_len, Rational};
 use roughcut_core::timeline::{self, Edge};
@@ -419,6 +420,13 @@ pub struct RoughcutApp {
     /// work and the identical picture, so the sheet waits for the proxy.
     pending_sheets: HashSet<ClipId>,
     pub proxy_state: HashMap<ClipId, ProxyState>,
+    /// The same, for the copies a phone plays. Kept apart because the two
+    /// are asked for by different people at different moments: the window
+    /// wants its proxies from the moment a clip arrives, the phone wants
+    /// its copies once it has connected.
+    pub phone_state: HashMap<ClipId, ProxyState>,
+    /// The page a phone reviews the bin from.
+    pub phone: crate::phone::Phone,
     /// Clips whose file is being rewritten on disk right now. Rotating twice
     /// at once would have two ffmpeg processes racing for the same path.
     pub rotating: HashSet<ClipId>,
@@ -530,6 +538,8 @@ impl RoughcutApp {
             selection_anchor: None,
             pending_sheets: HashSet::new(),
             proxy_state: HashMap::new(),
+            phone_state: HashMap::new(),
+            phone: crate::phone::Phone::start(cc.egui_ctx.clone()),
             rotating: HashSet::new(),
             toasts: Vec::new(),
             show_help: false,
@@ -2658,6 +2668,8 @@ impl RoughcutApp {
         self.selection_anchor = None;
         self.thumb_requested.clear();
         self.proxy_state.clear();
+        self.phone_state.clear();
+        self.phone.forget_watching();
         self.missing_media.clear();
         self.monitor.clear();
 
@@ -2763,6 +2775,8 @@ impl RoughcutApp {
         self.selection_anchor = None;
                 self.thumb_requested.clear();
                 self.proxy_state.clear();
+                self.phone_state.clear();
+                self.phone.forget_watching();
                 self.workers.clear_queue();
                 self.monitor.clear();
                 self.monitor.set_fps(self.project.fps());
@@ -3114,10 +3128,36 @@ impl RoughcutApp {
                     }
                     Err(e) => log::warn!("tiles for {clip_id}: {e:#}"),
                 },
-                JobResult::ProxyStarted { clip_id } => {
+                JobResult::ProxyStarted {
+                    clip_id,
+                    tier: proxy::Tier::Phone,
+                } => {
+                    self.phone_state.insert(clip_id, ProxyState::Running);
+                }
+                JobResult::ProxyStarted { clip_id, .. } => {
                     self.proxy_state.insert(clip_id, ProxyState::Running);
                 }
-                JobResult::ProxyDone { clip_id, result } => match result {
+                // A phone copy is found by the page on its own, by existing;
+                // the window only has to stop calling it queued. A failure is
+                // remembered so it is not retried every time the page loads,
+                // and logged rather than shown: the phone plays the original
+                // instead, and the person at the desk is not the one waiting.
+                JobResult::ProxyDone {
+                    clip_id,
+                    tier: proxy::Tier::Phone,
+                    result,
+                } => match result {
+                    Ok(_) => {
+                        self.phone_state.remove(&clip_id);
+                    }
+                    Err(e) => {
+                        self.phone_state.insert(clip_id, ProxyState::Failed);
+                        log::warn!("phone copy: {e:#}");
+                    }
+                },
+                JobResult::ProxyDone {
+                    clip_id, result, ..
+                } => match result {
                     Ok(path) => {
                         self.proxy_state.remove(&clip_id);
                         // Not an undoable edit: a proxy is a cache, not content.
@@ -3308,6 +3348,10 @@ impl RoughcutApp {
         if !on {
             self.workers.clear_queue();
             self.proxy_state.clear();
+            // Clearing the queue took the phone's copies with it. Forget
+            // them too, so the next thing the phone asks for queues them
+            // again.
+            self.phone_state.clear();
             // Clearing the queue dropped any tiles waiting in it, and the
             // pending sheets were waiting for proxies that are no longer
             // coming. Forget the requests; the bin re-asks for whatever is
@@ -3414,7 +3458,171 @@ impl RoughcutApp {
             source,
             info: Box::new(info),
             proxy_dir: dir,
+            tier: proxy::Tier::Edit,
         });
+    }
+
+    // --- the phone ----------------------------------------------------------
+
+    /// Act on what the phone asked for since the last pass.
+    ///
+    /// Writes come through here so that they are the same edits the window
+    /// makes — undoable, autosaved, and drawn on the next pass, which is this
+    /// one. The phone is answered with the clip's kept stretches afterwards,
+    /// so what it shows is what the project holds rather than what it hoped.
+    fn drain_phone(&mut self) {
+        let requests: Vec<crate::phone::Request> = self.phone.poll().collect();
+        let mut wrote = false;
+        for request in requests {
+            use crate::phone::Request;
+            match request {
+                Request::Connected => self.request_phone_copies(),
+                Request::Watching(id) => {
+                    // The clip on the phone's screen goes first. If it was
+                    // never queued — a project opened since, say — queue
+                    // the lot; it will still be at the front.
+                    if !self.workers.prioritise_phone_proxy(id) {
+                        self.request_phone_copies();
+                        self.workers.prioritise_phone_proxy(id);
+                    }
+                }
+                Request::Keep {
+                    clip,
+                    in_frame,
+                    out_frame,
+                    reply,
+                } => {
+                    let kept = self.edit(|p| p.clip_mut(clip).is_some_and(|c| c.keep(in_frame, out_frame)));
+                    wrote |= kept;
+                    let _ = reply.send(if kept {
+                        Ok(self.highlights_of(clip))
+                    } else if self.project.clip(clip).is_none() {
+                        Err("no such clip".into())
+                    } else {
+                        Err("that range is not inside the clip".into())
+                    });
+                }
+                Request::Drop { clip, index, reply } => {
+                    let dropped = self.edit(|p| match p.clip_mut(clip) {
+                        Some(c) if index < c.highlights.len() => {
+                            c.highlights.remove(index);
+                            true
+                        }
+                        _ => false,
+                    });
+                    wrote |= dropped;
+                    let _ = reply.send(if dropped || self.project.clip(clip).is_some() {
+                        Ok(self.highlights_of(clip))
+                    } else {
+                        Err("no such clip".into())
+                    });
+                }
+                Request::Archive {
+                    clip,
+                    archived,
+                    reply,
+                } => {
+                    if self.project.clip(clip).is_none() {
+                        let _ = reply.send(Err("no such clip".into()));
+                        continue;
+                    }
+                    let was = self.project.clip(clip).map(|c| c.archived);
+                    self.set_archived(clip, archived);
+                    wrote |= self.project.clip(clip).map(|c| c.archived) != was;
+                    let _ = reply.send(Ok(self.highlights_of(clip)));
+                }
+            }
+        }
+        // A decision made on the phone goes into the project file at once,
+        // not only into memory and the recovery snapshot. Nobody is at the
+        // desk to press Ctrl+S, and whatever reads the file next — the
+        // command line, an agent, this window reopened tomorrow — should see
+        // what was decided on the sofa. The edit is still undoable here.
+        if wrote {
+            if let Some(path) = self.project_path.clone() {
+                match project_io::save(&self.project, &path) {
+                    Ok(()) => {
+                        self.project_written = written_at(&path);
+                        self.dirty = false;
+                        self.mark_autosave_saved();
+                    }
+                    Err(e) => self.set_status(format!("{e:#}"), StatusKind::Error),
+                }
+            }
+        }
+    }
+
+    fn highlights_of(&self, id: ClipId) -> Vec<(i64, i64)> {
+        self.project
+            .clip(id)
+            .map(|c| c.highlights.iter().map(|h| (h.in_frame, h.out_frame)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Queue a phone copy of every clip that has not got one.
+    ///
+    /// Called when a phone connects, and harmless to call again: a copy that
+    /// exists is found on disk, one being made is remembered, and one that
+    /// failed is not tried twice in a session. Archived footage is skipped
+    /// for the same reason the window skips it — it has been rejected — and
+    /// so are photographs and sound, which a phone cannot play anyway.
+    fn request_phone_copies(&mut self) {
+        let Some(dir) = self
+            .settings
+            .resolve_proxy_dir(self.project_path.as_deref())
+        else {
+            return;
+        };
+        let ids: Vec<ClipId> = self.project.clips.iter().map(|c| c.id).collect();
+        let mut queued = 0;
+        for id in ids {
+            let Some(clip) = self.project.clip(id) else { continue };
+            if clip.still
+                || clip.audio_only
+                || !self.worth_preparing(id)
+                || self.phone_state.contains_key(&id)
+                || proxy::Tier::Phone.path(&dir, id).is_file()
+            {
+                continue;
+            }
+            let info = MediaInfo {
+                width: clip.width,
+                height: clip.height,
+                rotation: 0,
+                fps: clip.native_fps(),
+                variable_rate: clip.variable_rate,
+                native_frames: clip.native_frames,
+                sample_aspect_num: clip.sample_aspect_num,
+                sample_aspect_den: clip.sample_aspect_den,
+                progressive: clip.progressive,
+                colorspace: clip.colorspace,
+                video_index: clip.video_index,
+                audio_index: clip.audio_index,
+                has_audio: clip.has_audio,
+                still: false,
+                audio_only: false,
+                seconds: 0.0,
+            };
+            let source = clip.path.clone();
+            self.phone_state.insert(id, ProxyState::Queued);
+            self.workers.submit(Job::Proxy {
+                clip_id: id,
+                source,
+                info: Box::new(info),
+                proxy_dir: dir.clone(),
+                tier: proxy::Tier::Phone,
+            });
+            queued += 1;
+        }
+        if queued > 0 {
+            self.set_status(
+                format!(
+                    "phone connected — making phone copies of {queued} clip{}",
+                    if queued == 1 { "" } else { "s" }
+                ),
+                StatusKind::Info,
+            );
+        }
     }
 
     /// Correct a clip in the bin against a fresh probe of its file.
@@ -3871,6 +4079,8 @@ impl eframe::App for RoughcutApp {
         timings.mark("dropped");
         self.drain_workers(ctx);
         timings.mark("drain_workers");
+        self.drain_phone();
+        timings.mark("phone");
         self.drain_render();
         self.sync_edl();
         timings.mark("sync_edl");
@@ -3942,6 +4152,17 @@ impl eframe::App for RoughcutApp {
         // One write per pass at most, and only when something actually
         // changed. Passes happen on input, so this costs nothing at idle.
         self.flush_autosave();
+
+        // What the phone sees. Built every pass and stored only when it
+        // differs, which is the same bargain as the title below: cheap to
+        // compare, and there is no single place edits happen that would be
+        // cheaper to hook.
+        let snapshot = crate::phone::Snapshot::of(
+            &self.project,
+            self.project_path.as_deref(),
+            self.settings.resolve_proxy_dir(self.project_path.as_deref()),
+        );
+        self.phone.publish(snapshot);
 
         let title = self.window_title();
         if title != self.last_title {

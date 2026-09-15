@@ -18,6 +18,7 @@ mod clipboard;
 mod gauge;
 mod keys;
 mod monitor;
+mod phone;
 mod settings;
 mod theme;
 mod ui;

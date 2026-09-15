@@ -79,7 +79,7 @@ fn a_generated_proxy_maps_frame_for_frame() {
     };
 
     let proxy_dir = dir.join("proxies");
-    let proxy_path = proxy::generate(&ffmpeg, &ffprobe, &clip, &info, &proxy_dir)
+    let proxy_path = proxy::generate(&ffmpeg, &ffprobe, &clip, &info, &proxy_dir, proxy::Tier::Edit)
         .expect("proxy generation failed");
     assert!(proxy_path.exists());
     // The final name is the adoption contract: a session that reopens a

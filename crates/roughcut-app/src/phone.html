@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>__PROJECT__ — bin review</title>
+<style>
+  /* Roughcut's own palette: these judgements go straight into that window,
+     and footage is judged against a dark ground in both places. */
+  :root { color-scheme: dark;
+    --bg:#141416; --panel:#1b1b1e; --raised:#232327; --line:#333338;
+    --text:#dcdce0; --dim:#8a8a92; --accent:#4c9aff;
+    --keep:#2fa86a; --keep-lit:#4cd17a; --out:#ff8c42; --error:#ff5c5c;
+    --ui:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.45 var(--ui);
+         padding-bottom:calc(18px + env(safe-area-inset-bottom)); }
+  .wrap { max-width:620px; margin:0 auto; }
+
+  /* The header and the video are one pinned block. Sticky elements that
+     each claim top:0 separately fight over which is in front; this way
+     there is nothing to resolve, and the z-index only has to beat the
+     positioned elements further down the page. */
+  .top { position:sticky; top:0; z-index:10; background:var(--bg); }
+  header { background:var(--panel); border-bottom:1px solid var(--line);
+           padding:calc(8px + env(safe-area-inset-top)) 12px 8px; }
+  .titles { display:flex; align-items:baseline; justify-content:space-between;
+            gap:6px 10px; flex-wrap:wrap; min-width:0; }
+  .project { min-width:0; font-size:13px; font-weight:600; letter-spacing:.06em;
+             text-transform:uppercase; }
+  .tally { min-width:0; font-family:var(--mono); font-size:12px;
+           font-variant-numeric:tabular-nums; color:var(--dim); }
+  .tally b { color:var(--keep-lit); font-weight:600; }
+  .rail { display:flex; gap:2px; margin-top:8px; }
+  .cell { flex:1 1 0; height:16px; min-width:0; padding:0; border:0;
+          border-radius:1px; background:var(--raised); position:relative; }
+  .cell[data-state="kept"] { background:var(--keep); }
+  .cell[data-state="archived"] { background:#2a2a2e; }
+  .cell[data-state="archived"]::after { content:""; position:absolute;
+          inset:6px 2px auto; height:1px; background:var(--dim); }
+  .cell[data-current="1"] { box-shadow:inset 0 0 0 2px var(--accent); }
+
+  .stage { background:#000; }
+  video { width:100%; display:block; background:#000; max-height:52vh; }
+  .missing { padding:30px 12px; text-align:center; color:var(--dim); font-size:13px; }
+  /* Which file is playing, only while it is not the one meant for a phone:
+     the original is heavier over the air, and this says why. */
+  .source { padding:5px 12px; font-size:12px; color:var(--dim); background:var(--panel);
+            border-bottom:1px solid var(--line); }
+
+  .clip { padding:12px; }
+  .name { display:flex; align-items:center; gap:8px; font-family:var(--mono);
+          font-size:13px; margin-bottom:8px; }
+  .name .index { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .name .len { margin-left:auto; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .archived .name { color:var(--dim); }
+
+  /* The same shape as the scrub bar under the monitor in the window:
+     kept stretches in green, the range being chosen on top of them. */
+  /* The one control that matters: drag across it to choose a stretch, tap
+     it to move the playhead. Tall enough to grab with a thumb, and
+     touch-action:none so the page does not scroll out from under the drag. */
+  .bar { position:relative; height:46px; margin-top:10px; background:var(--raised);
+         border:1px solid var(--line); overflow:hidden; touch-action:none;
+         cursor:ew-resize; }
+  .hint { position:absolute; inset:0; display:grid; place-items:center;
+          font-size:12px; color:var(--dim); pointer-events:none; }
+  .bar .kept { position:absolute; top:0; bottom:0; background:rgba(47,168,106,.72);
+          border-left:1px solid var(--keep-lit); border-right:1px solid var(--keep-lit); }
+  .bar .sel  { position:absolute; top:0; bottom:0; background:rgba(76,154,255,.26);
+          border-left:2px solid var(--keep-lit); border-right:2px solid var(--out); }
+  .bar .head { position:absolute; top:0; bottom:0; width:2px;
+          background:var(--playhead,#ffd84c); }
+
+  .readout { display:flex; gap:12px; margin-top:6px; font-family:var(--mono);
+             font-size:13px; font-variant-numeric:tabular-nums; color:var(--dim); }
+  .readout .span { color:var(--text); }
+  .readout .dur { margin-left:auto; color:var(--keep-lit); }
+  /* Dismissing a half-made choice is not worth a button the size of the
+     ones that commit one. */
+  .readout .x { flex:0 0 auto; min-height:0; padding:0 6px; font-size:15px;
+                line-height:1.2; background:none; border:0; color:var(--dim); }
+
+  .row { display:flex; gap:8px; margin-top:10px; }
+  /* min-width:0 matters: a flex item will not shrink below its own
+     min-content width without it, so one long label ("Restore to bin")
+     pushed the whole row wider than the phone. */
+  button { font:600 15px var(--ui); color:var(--text); background:var(--raised);
+           border:1px solid var(--line); border-radius:3px; padding:13px 10px;
+           min-height:46px; flex:1 1 0; min-width:0; overflow:hidden;
+           text-overflow:ellipsis; white-space:nowrap; }
+  button:active { background:#2c2c31; }
+  button:disabled { opacity:.4; }
+  .primary { background:var(--keep); border-color:var(--keep-lit); color:#06130c; }
+  .primary:disabled { background:var(--raised); border-color:var(--line); color:var(--text); }
+  .on { border-color:var(--out); color:var(--out); }
+
+  .keeps { margin-top:14px; }
+  .keeps h2 { font-size:11px; font-weight:600; letter-spacing:.08em;
+              text-transform:uppercase; color:var(--dim); margin:0 0 6px; }
+  .keeps ul { list-style:none; margin:0; padding:0; display:flex;
+              flex-direction:column; gap:4px; }
+  /* The row itself plays the stretch, so only dropping needs a control. */
+  .keeps li { display:flex; align-items:center; gap:10px; background:var(--panel);
+              border:1px solid var(--line); border-left:3px solid var(--keep);
+              padding:11px 10px; font-family:var(--mono); font-size:12px;
+              font-variant-numeric:tabular-nums; cursor:pointer; }
+  .keeps li:active { background:var(--raised); }
+  .keeps .of { color:var(--dim); margin-left:auto; }
+  .keeps .drop { flex:0 0 auto; min-height:0; padding:2px 8px; font-size:15px;
+              line-height:1.2; background:none; border:0; color:var(--dim); }
+
+  /* What was said, under the decisions about it. Whisper gives words with
+     the frame each is spoken on, so a line is a seek target as well as
+     something to read -- which is most of why the transcript is worth
+     having on the phone at all. */
+  .script { margin-top:18px; }
+  .script h2 { font-size:11px; font-weight:600; letter-spacing:.08em;
+               text-transform:uppercase; color:var(--dim); margin:0 0 6px;
+               display:flex; gap:8px; align-items:baseline; }
+  .script ol { list-style:none; margin:0; padding:0; }
+  .script li { display:flex; gap:10px; padding:9px 10px; cursor:pointer;
+               border-bottom:1px solid var(--line); align-items:baseline; }
+  .script li:active { background:var(--raised); }
+  .script li.now { background:#1c2128; box-shadow:inset 3px 0 0 var(--accent); }
+  .script li.claimed { box-shadow:inset 3px 0 0 var(--keep); }
+  .script li.now.claimed { box-shadow:inset 3px 0 0 var(--keep-lit); }
+  .script .at { flex:0 0 auto; font-family:var(--mono); font-size:12px;
+                font-variant-numeric:tabular-nums; color:var(--accent);
+                min-width:44px; }
+  .script li.claimed .at { color:var(--keep-lit); }
+  .script .said { flex:1 1 auto; min-width:0; font-size:15px; }
+
+  /* Shown only when something failed, and gone the moment it stops being
+     true -- so it costs nothing at rest. */
+  .status { margin:14px 12px 0; padding:9px 11px; font-size:13px;
+            color:var(--text); background:var(--panel);
+            border:1px solid var(--line); border-left:3px solid var(--error);
+            overflow-wrap:anywhere; }
+</style></head><body>
+<div class="wrap">
+  <div class="top">
+  <header>
+    <div class="titles">
+      <span class="project" id="project">—</span>
+      <span class="tally" id="tally"></span>
+    </div>
+    <div class="rail" id="rail"></div>
+  </header>
+
+  <div class="stage">
+    <video id="v" controls playsinline preload="metadata"></video>
+    <div class="missing" id="missing" hidden>Nothing here a phone can play.</div>
+    <div class="source" id="source" hidden></div>
+  </div>
+  </div>
+
+  <main class="clip" id="clip">
+    <div class="name">
+      <span class="index" id="index"></span>
+      <span id="filename">—</span>
+      <span class="len" id="length"></span>
+    </div>
+
+    <div class="bar" id="bar">
+      <div class="hint" id="hint">Drag across to choose a stretch</div>
+      <div class="head" id="head" style="left:0"></div>
+    </div>
+    <div class="readout" id="readout" hidden>
+      <span class="span" id="span"></span>
+      <span class="dur" id="dur"></span>
+      <button class="x" id="clear" aria-label="Discard this stretch">&times;</button>
+    </div>
+
+    <div class="row">
+      <button id="keep" class="primary" disabled>Keep this stretch</button>
+    </div>
+    <div class="row">
+      <button id="prev">‹ Prev</button>
+      <button id="archive">Archive</button>
+      <button id="next">Next ›</button>
+    </div>
+
+    <section class="keeps" id="keepsSection" hidden>
+      <h2 id="keepsTitle">Kept stretches</h2>
+      <ul id="keepList"></ul>
+    </section>
+
+    <section class="script" id="scriptSection" hidden>
+      <h2>Transcript</h2>
+      <ol id="script"></ol>
+    </section>
+  </main>
+
+  <p class="status" id="status" hidden></p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var S = null, at = 0, sel = null, FPS = 30;
+  var $ = function (id) { return document.getElementById(id); };
+  var v = $("v");
+
+  // Frames stay the unit -- every position sent to the server is a frame
+  // number, and the project stores frames -- but a second is the finest
+  // thing shown. A frame is imperceptible at a glance, so displaying one
+  // is precision nobody can act on and everybody has to read past.
+  // Minutes, to one decimal: "3.5m". A running total is a sense of scale,
+  // not a cue point -- nobody needs it to the frame, and m:ss invites you
+  // to read it as one.
+  function mins(f) {
+    if (!f) return "0m";
+    return (f / FPS / 60).toFixed(1) + "m";
+  }
+  function mmss(f) {
+    var t = Math.round(f / FPS);
+    return Math.floor(t / 60) + ":" + (t % 60 < 10 ? "0" : "") + (t % 60);
+  }
+  // Failures only. Anything else clears it: a later success means whatever
+  // went wrong is no longer the state of things.
+  function status(t) {
+    var el = $("status");
+    el.textContent = t || "";
+    el.hidden = !t;
+  }
+  function clip() { return S.clips[at]; }
+  // The playhead is the video's own clock, so a frame number always means
+  // the frame that is actually on screen.
+  function frameNow() { return Math.round((v.currentTime || 0) * FPS); }
+
+  function send(path, body) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    });
+  }
+
+  function paintBar() {
+    var c = clip(), bar = $("bar"), last = Math.max(1, c.frames - 1);
+    Array.prototype.slice.call(bar.querySelectorAll(".kept,.sel")).forEach(function (n) { n.remove(); });
+    c.hi.forEach(function (h) {
+      var d = document.createElement("div");
+      d.className = "kept";
+      d.style.left = (100 * h[0] / last) + "%";
+      d.style.width = "max(3px," + (100 * (h[1] - h[0]) / last) + "%)";
+      bar.insertBefore(d, $("head"));
+    });
+    if (sel) {
+      var a = Math.min(sel[0], sel[1]), b = Math.max(sel[0], sel[1]);
+      var d2 = document.createElement("div");
+      d2.className = "sel";
+      d2.style.left = (100 * a / last) + "%";
+      d2.style.width = "max(3px," + (100 * (b - a) / last) + "%)";
+      bar.insertBefore(d2, $("head"));
+      $("span").textContent = mmss(a) + " → " + mmss(b);
+      $("dur").textContent = "+" + mmss(b - a + 1);
+    }
+    $("readout").hidden = !sel;
+    $("keep").disabled = !sel;
+    $("hint").hidden = !!sel || c.hi.length > 0;
+  }
+
+  function paintHead() {
+    var c = clip(), last = Math.max(1, c.frames - 1);
+    $("head").style.left = (100 * Math.min(frameNow(), last) / last) + "%";
+  }
+
+  function paintRail() {
+    var cells = $("rail").children, kept = 0, arch = 0, all = 0;
+    S.clips.forEach(function (c, i) {
+      // Footage, not clips: a pass is heading for a cut of some length, and
+      // thirty clips holding four seconds each is a different position from
+      // three holding a minute. How many clips are in which state is already
+      // on the rail, cell by cell; the totals are what it cannot show.
+      c.hi.forEach(function (h) { kept += h[1] - h[0] + 1; });
+      if (c.arch) arch += c.frames;
+      all += c.frames;
+      cells[i].setAttribute("data-state", c.arch ? "archived" : (c.hi.length ? "kept" : "new"));
+      cells[i].setAttribute("data-current", i === at ? "1" : "0");
+    });
+    $("tally").innerHTML = "<b>" + mins(kept) + "</b> kept &middot; " +
+                           mins(arch) + " archived &middot; " + mins(all) + " total";
+  }
+
+  function render() {
+    var c = clip();
+    $("index").textContent = (at + 1) + "/" + S.clips.length;
+    $("filename").textContent = c.name;
+    $("length").textContent = mmss(c.frames);
+    $("clip").classList.toggle("archived", c.arch);
+    $("archive").textContent = c.arch ? "Restore" : "Archive";
+    $("archive").classList.toggle("on", c.arch);
+    $("prev").disabled = at === 0;
+    $("next").disabled = at === S.clips.length - 1;
+    $("missing").hidden = !!c.src;
+    v.hidden = !c.src;
+    if (c.src) {
+      // The file behind the URL changes as copies land, so the copy in hand
+      // is part of the address: a clip that has just been prepared is a
+      // different request, not a cached one.
+      var want = "/video/" + c.id + "?" + c.src;
+      if (v.getAttribute("src") !== want) { v.setAttribute("src", want); v.load(); }
+    } else {
+      v.removeAttribute("src");
+    }
+    var note = c.src === "original" ? "Playing the original until the phone copy is ready"
+             : c.src === "edit" ? "Playing the window\u2019s proxy until the phone copy is ready"
+             : "";
+    $("source").textContent = note;
+    $("source").hidden = !note;
+
+    var list = $("keepList");
+    list.textContent = "";
+    c.hi.forEach(function (h, i) {
+      var li = document.createElement("li");
+      var span = document.createElement("span");
+      span.textContent = mmss(h[0]) + " → " + mmss(h[1]);
+      var of = document.createElement("span");
+      of.className = "of";
+      of.textContent = mmss(h[1] - h[0] + 1);
+      li.title = "Play this stretch";
+      li.onclick = function () { v.currentTime = h[0] / FPS; v.play(); };
+      var drop = document.createElement("button");
+      drop.className = "drop"; drop.innerHTML = "&times;";
+      drop.setAttribute("aria-label", "Drop the stretch at " + mmss(h[0]));
+      drop.onclick = function (e) {
+        e.stopPropagation();          // the row plays; the cross removes
+        send("/drop", { clip: c.id, index: i }).then(function (r) {
+          c.hi = r.hi; render(); paintScript(); status(null);
+        }).catch(function (e2) { status("Could not drop that: " + e2.message); });
+      };
+      li.appendChild(span); li.appendChild(of); li.appendChild(drop);
+      list.appendChild(li);
+    });
+    var clipFrames = 0;
+    c.hi.forEach(function (h) { clipFrames += h[1] - h[0] + 1; });
+    $("keepsSection").hidden = !c.hi.length;
+    $("keepsTitle").textContent =
+      "Kept stretches \u00b7 " + mmss(clipFrames) + " of " + mmss(c.frames);
+    paintBar(); paintHead(); paintRail();
+  }
+
+  function go(i) {
+    at = Math.max(0, Math.min(S.clips.length - 1, i));
+    sel = null;
+    render();
+    loadScript();
+    watchForCopies();
+    window.scrollTo({ top: 0 });
+    // Moving to a clip is a request to watch it. This runs inside the tap
+    // that asked for it, which is the only reason a phone will start it
+    // with the sound on; a refusal is not worth reporting, since the
+    // controls are right there. Deliberately not in render(): the first
+    // load is not a gesture, and a page that starts talking on open is a
+    // different thing entirely.
+    if (clip().src) {
+      var started = v.play();
+      if (started && started.catch) started.catch(function () {});
+    }
+  }
+
+  // --- copies landing while the page is open --------------------------------
+
+  // Roughcut makes the phone copies in the background once the phone has
+  // connected, in bin order with the clip on screen first. While the clip on
+  // screen is playing from something else, ask every few seconds whether
+  // its copy has landed. Nothing is asked once it has: at rest this costs
+  // nothing on either side.
+  var readyTimer = null;
+  function watchForCopies() {
+    if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
+    var c = clip();
+    if (!c.src || c.src === "phone") return;
+    readyTimer = setTimeout(function () {
+      readyTimer = null;
+      fetch("/state").then(function (r) { return r.json(); }).then(function (s) {
+        var here = clip();
+        s.clips.forEach(function (n, i) { if (S.clips[i] && S.clips[i].id === n.id) S.clips[i].src = n.src; });
+        // Swap the picture only when nothing is being watched: yanking a
+        // playing clip to the same frame of a different file is a stutter
+        // nobody asked for. Paused, it is free.
+        if (here.src === "phone" && v.paused) {
+          var t = v.currentTime;
+          render();
+          v.addEventListener("loadedmetadata", function once() {
+            v.removeEventListener("loadedmetadata", once);
+            v.currentTime = t;
+          });
+        }
+        watchForCopies();
+      }).catch(function () { watchForCopies(); });
+    }, 4000);
+  }
+
+  // --- transcript --------------------------------------------------------
+
+  var script = [], scriptFor = null, activeLine = -1;
+
+  function loadScript() {
+    var c = clip();
+    if (scriptFor === c.id) { paintScript(); return; }
+    scriptFor = c.id;
+    script = [];
+    activeLine = -1;
+    $("script").textContent = "";
+    $("scriptSection").hidden = true;
+    fetch("/transcript/" + c.id).then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (scriptFor !== c.id) return;      // moved on while it loaded
+        script = d.lines || [];
+        paintScript();
+      })
+      .catch(function () {
+        if (scriptFor === c.id) status("Could not read the transcript.");
+      });
+  }
+
+  function inKept(frame) {
+    return clip().hi.some(function (h) { return frame >= h[0] && frame <= h[1]; });
+  }
+
+  function paintScript() {
+    var ol = $("script");
+    ol.textContent = "";
+    // A clip nobody spoke in has no transcript to head, so the whole
+    // section goes rather than announcing its own emptiness.
+    $("scriptSection").hidden = !script.length;
+    script.forEach(function (line, i) {
+      var li = document.createElement("li");
+      li.dataset.i = i;
+      // A line already inside a kept stretch is marked, so a second pass
+      // can see what has been claimed without cross-checking the bar.
+      if (inKept(line.frame)) li.classList.add("claimed");
+      var at_ = document.createElement("span");
+      at_.className = "at";
+      at_.textContent = mmss(line.frame);
+      var said = document.createElement("span");
+      said.className = "said";
+      said.textContent = line.text;
+      li.appendChild(at_); li.appendChild(said);
+      li.onclick = function () { v.currentTime = line.frame / FPS; v.play(); };
+      ol.appendChild(li);
+    });
+    followScript();
+  }
+
+  // Keep the spoken line under the playhead marked, so reading and watching
+  // stay in step without having to look between them.
+  function followScript() {
+    if (!script.length) return;
+    var f = frameNow(), found = -1;
+    for (var i = 0; i < script.length; i++) {
+      if (f >= script[i].frame) found = i; else break;
+    }
+    if (found === activeLine) return;
+    var ol = $("script");
+    if (activeLine >= 0 && ol.children[activeLine]) {
+      ol.children[activeLine].classList.remove("now");
+    }
+    activeLine = found;
+    if (found >= 0 && ol.children[found]) {
+      ol.children[found].classList.add("now");
+    }
+  }
+
+  $("clear").onclick = function () { sel = null; paintBar(); };
+
+  // One gesture on the bar does both jobs: a drag paints the stretch you are
+  // choosing, a tap moves the playhead. They are told apart by distance, so
+  // neither has to be a button.
+  (function () {
+    var bar = $("bar"), mode = null, anchor = 0, startX = 0, moved = false;
+    var SLOP = 6;                       // px before a tap becomes a drag
+
+    function frameAt(clientX) {
+      var r = bar.getBoundingClientRect(), c = clip();
+      var t = (clientX - r.left) / r.width;
+      return Math.max(0, Math.min(c.frames - 1, Math.round(t * (c.frames - 1))));
+    }
+
+    bar.addEventListener("pointerdown", function (e) {
+      bar.setPointerCapture(e.pointerId);
+      startX = e.clientX;
+      moved = false;
+      var f = frameAt(e.clientX), c = clip();
+      // Grabbing near an edge of the pending stretch adjusts that edge --
+      // the commonest correction after a coarse drag with a thumb.
+      var grab = (c.frames - 1) * 0.05;
+      if (sel && Math.abs(f - sel[0]) <= grab) { mode = "in"; anchor = sel[1]; }
+      else if (sel && Math.abs(f - sel[1]) <= grab) { mode = "out"; anchor = sel[0]; }
+      else { mode = "new"; anchor = f; }
+      e.preventDefault();
+    });
+
+    bar.addEventListener("pointermove", function (e) {
+      if (mode === null) return;
+      if (!moved && Math.abs(e.clientX - startX) < SLOP) return;
+      moved = true;
+      var f = frameAt(e.clientX);
+      sel = mode === "in" ? [f, anchor] : [anchor, f];
+      paintBar();
+    });
+
+    function end(e) {
+      if (mode === null) return;
+      if (!moved) {
+        // A tap: go there, and leave any pending stretch alone.
+        v.currentTime = frameAt(e.clientX) / FPS;
+      } else if (sel) {
+        sel = [Math.min(sel[0], sel[1]), Math.max(sel[0], sel[1])];
+      }
+      mode = null;
+      paintBar();
+    }
+    bar.addEventListener("pointerup", end);
+    bar.addEventListener("pointercancel", function () { mode = null; });
+  })();
+
+  $("keep").onclick = function () {
+    var c = clip();
+    send("/keep", { clip: c.id, in: sel[0], out: sel[1] }).then(function (r) {
+      c.hi = r.hi; sel = null; render(); paintScript(); status(null);
+    }).catch(function (e) { status("Could not keep that: " + e.message); });
+  };
+
+  $("archive").onclick = function () {
+    var c = clip(), want = !c.arch;
+    send("/archive", { clip: c.id, archived: want }).then(function () {
+      c.arch = want; render(); status(null);
+      if (want && at < S.clips.length - 1) setTimeout(function () { go(at + 1); }, 200);
+    }).catch(function (e) { status("Could not archive that: " + e.message); });
+  };
+
+  $("prev").onclick = function () { go(at - 1); };
+  $("next").onclick = function () { go(at + 1); };
+  v.addEventListener("timeupdate", function () { paintHead(); followScript(); });
+  v.addEventListener("pause", function () {
+    var c = clip();
+    if (c.src === "phone" && v.getAttribute("src") !== "/video/" + c.id + "?phone") {
+      var t = v.currentTime;
+      render();
+      v.addEventListener("loadedmetadata", function once() {
+        v.removeEventListener("loadedmetadata", once);
+        v.currentTime = t;
+      });
+    }
+  });
+  v.addEventListener("seeked", function () { paintHead(); followScript(); });
+
+  fetch("/state").then(function (r) { return r.json(); }).then(function (s) {
+    S = s; FPS = s.fps;
+    $("project").textContent = s.project;
+    var rail = $("rail");
+    s.clips.forEach(function (c, i) {
+      var b = document.createElement("button");
+      b.className = "cell"; b.type = "button"; b.title = c.name;
+      b.onclick = function () { go(i); };
+      rail.appendChild(b);
+    });
+    render();
+    loadScript();
+    watchForCopies();
+  }).catch(function (e) { status("Could not load the bin: " + e.message); });
+})();
+</script></body></html>

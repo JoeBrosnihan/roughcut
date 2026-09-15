@@ -37,7 +37,7 @@ does not ship them.
 
 ## Rust dependencies
 
-335 crates, all permissive. Regenerate the list with:
+339 crates, all permissive. Regenerate the list with:
 
 ```
 cargo metadata --format-version 1 --all-features

@@ -106,6 +106,26 @@ pub fn show(app: &mut RoughcutApp, ctx: &egui::Context) {
 
                     ui.add_space(8.0);
                     ui.label(
+                        egui::RichText::new("From your phone")
+                            .strong()
+                            .color(theme::ACCENT),
+                    );
+                    // The bin, one clip at a time, on any phone on the same
+                    // network: keep the good stretches, archive the rest,
+                    // and it lands here as you do it.
+                    let (text, color) = match app.phone.address() {
+                        Ok(url) => (url.to_string(), theme::TEXT_DIM),
+                        Err(why) => (why.to_string(), theme::WARN),
+                    };
+                    ui.label(
+                        egui::RichText::new(text)
+                            .small()
+                            .monospace()
+                            .color(color),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.label(
                         egui::RichText::new("External tools")
                             .strong()
                             .color(theme::ACCENT),

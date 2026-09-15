@@ -92,6 +92,11 @@ pub enum Priority {
     /// general queue also means a long transcription can never delay a
     /// thumbnail somebody is waiting to see.
     Slow,
+    /// Copies for a phone that has connected. Behind everything the window
+    /// is waiting on, but — like transcription — not stopped by the window
+    /// losing focus, because the person who wants them is on the sofa with
+    /// the phone, not at the desk.
+    Phone,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +127,7 @@ pub enum Job {
         source: PathBuf,
         info: Box<MediaInfo>,
         proxy_dir: PathBuf,
+        tier: proxy::Tier,
     },
     /// Rewrite a source file's orientation in place. A stream copy, but on a
     /// large file still slow enough that the UI must not wait on it.
@@ -186,9 +192,11 @@ pub enum JobResult {
     },
     ProxyStarted {
         clip_id: ClipId,
+        tier: proxy::Tier,
     },
     ProxyDone {
         clip_id: ClipId,
+        tier: proxy::Tier,
         result: Result<PathBuf>,
     },
     Rotated {
@@ -213,6 +221,7 @@ struct Queue {
     high: VecDeque<Job>,
     low: VecDeque<Job>,
     slow: VecDeque<Job>,
+    phone: VecDeque<Job>,
     suspended: bool,
     shutdown: bool,
 }
@@ -233,6 +242,10 @@ impl Job {
             | Job::MixBed { .. } => Priority::High,
             Job::Thumbs { tiles, .. } if *tiles <= 1 => Priority::High,
             Job::Transcribe { .. } => Priority::Slow,
+            Job::Proxy {
+                tier: proxy::Tier::Phone,
+                ..
+            } => Priority::Phone,
             Job::Thumbs { .. } | Job::Proxy { .. } => Priority::Low,
         }
     }
@@ -265,6 +278,7 @@ impl WorkerPool {
                 high: VecDeque::new(),
                 low: VecDeque::new(),
                 slow: VecDeque::new(),
+                phone: VecDeque::new(),
                 suspended: false,
                 shutdown: false,
             }),
@@ -334,6 +348,7 @@ impl WorkerPool {
                 Priority::High => q.high.push_back(job),
                 Priority::Low => q.low.push_back(job),
                 Priority::Slow => q.slow.push_back(job),
+                Priority::Phone => q.phone.push_back(job),
             }
         }
         // `notify_all`, not `notify_one`: the reserved thread ignores
@@ -408,12 +423,33 @@ impl WorkerPool {
         true
     }
 
+    /// Move a clip's phone copy to the front of the phone queue.
+    ///
+    /// The phone asks for clips in whatever order its owner taps them, and
+    /// the queue was filled in bin order. Same treatment as a transcript or
+    /// a sheet: nothing is cancelled or re-run, the waiting job goes first.
+    pub fn prioritise_phone_proxy(&self, clip_id: ClipId) -> bool {
+        let mut q = self.shared.queue.lock().unwrap();
+        let Some(at) = q.phone.iter().position(
+            |j| matches!(j, Job::Proxy { clip_id: c, .. } if *c == clip_id),
+        ) else {
+            return false;
+        };
+        if at > 0 {
+            if let Some(job) = q.phone.remove(at) {
+                q.phone.push_front(job);
+            }
+        }
+        true
+    }
+
     /// Drop everything not yet started, e.g. when a project is closed.
     pub fn clear_queue(&self) {
         let mut q = self.shared.queue.lock().unwrap();
         q.high.clear();
         q.low.clear();
         q.slow.clear();
+        q.phone.clear();
     }
 }
 
@@ -425,6 +461,7 @@ impl Drop for WorkerPool {
             q.high.clear();
             q.low.clear();
             q.slow.clear();
+            q.phone.clear();
         }
         self.shared.wake.notify_all();
         for t in self.threads.drain(..) {
@@ -467,28 +504,35 @@ fn worker_loop(shared: Arc<Shared>, role: Role) {
                 // Idle still costs nothing: this thread sleeps on the same
                 // condvar as the rest and wakes only when there is a clip
                 // waiting.
-                if !q.suspended || role == Role::Transcriber {
-                    // Speculative work waits while the children already
-                    // running hold more memory than the budget allows. Not a
-                    // warning to act on — the pool simply stops starting more
-                    // until what is running finishes; the gauge wakes this
-                    // condvar when it does. Work someone is waiting on (the
-                    // high queue) is never held.
-                    let room = !crate::gauge::over_budget();
-                    // The reserved thread never touches the low queue, so it
-                    // is always free for the next thing the user asks for.
-                    let next = match role {
-                        Role::Interactive => q.high.pop_front(),
-                        Role::Transcriber if room => q.slow.pop_front(),
-                        Role::Transcriber => None,
-                        Role::General => q
-                            .high
-                            .pop_front()
-                            .or_else(|| if room { q.low.pop_front() } else { None }),
-                    };
-                    if let Some(job) = next {
-                        break job;
-                    }
+                // Copies for a phone carry on too, for the same reason: they
+                // are only ever queued because a phone has connected, and
+                // the person holding it has left the desk. They still queue
+                // behind everything the window itself is waiting on.
+                //
+                // Speculative work waits while the children already running
+                // hold more memory than the budget allows. Not a warning to
+                // act on — the pool simply stops starting more until what is
+                // running finishes; the gauge wakes this condvar when it
+                // does. Work someone is waiting on (the high queue) is never
+                // held.
+                let room = !crate::gauge::over_budget();
+                // The reserved thread never touches the low queue, so it is
+                // always free for the next thing the user asks for.
+                let next = match role {
+                    Role::Interactive if !q.suspended => q.high.pop_front(),
+                    Role::Interactive => None,
+                    Role::Transcriber if room => q.slow.pop_front(),
+                    Role::Transcriber => None,
+                    Role::General if !q.suspended => q
+                        .high
+                        .pop_front()
+                        .or_else(|| if room { q.low.pop_front() } else { None })
+                        .or_else(|| if room { q.phone.pop_front() } else { None }),
+                    Role::General if room => q.phone.pop_front(),
+                    Role::General => None,
+                };
+                if let Some(job) = next {
+                    break job;
                 }
                 q = shared.wake.wait(q).unwrap();
             }
@@ -544,8 +588,9 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
             source,
             info,
             proxy_dir,
+            tier,
         } => {
-            let _ = shared.tx.send(JobResult::ProxyStarted { clip_id });
+            let _ = shared.tx.send(JobResult::ProxyStarted { clip_id, tier });
             shared.ctx.request_repaint();
             let result = match (&shared.tools.ffmpeg, &shared.tools.ffprobe) {
                 (Some(ffmpeg), Some(ffprobe)) => {
@@ -577,13 +622,17 @@ fn run_job(shared: &Shared, job: Job) -> JobResult {
                         highlights: Vec::new(),
                         archived: false,
                     };
-                    proxy::generate(ffmpeg, ffprobe, &stub, &info, &proxy_dir)
+                    proxy::generate(ffmpeg, ffprobe, &stub, &info, &proxy_dir, tier)
                 }
                 _ => Err(anyhow::anyhow!(
                     "proxy generation needs both ffmpeg and ffprobe"
                 )),
             };
-            JobResult::ProxyDone { clip_id, result }
+            JobResult::ProxyDone {
+                clip_id,
+                tier,
+                result,
+            }
         }
         Job::Rotate {
             clip_id,
@@ -1362,6 +1411,117 @@ mod tests {
         const NORMAL: u32 = 0x0000_0020;
         assert_eq!(bg, BELOW_NORMAL, "background work is not deprioritised");
         assert_eq!(fg, NORMAL, "foreground work should not be slowed down");
+    }
+
+    fn phone_proxy_job(clip_id: ClipId) -> Job {
+        Job::Proxy {
+            clip_id,
+            source: PathBuf::from("a.mp4"),
+            info: Box::new(MediaInfo {
+                width: 1920,
+                height: 1080,
+                rotation: 0,
+                fps: Rational::new(30, 1),
+                variable_rate: false,
+                native_frames: 30,
+                sample_aspect_num: 1,
+                sample_aspect_den: 1,
+                progressive: true,
+                colorspace: 709,
+                video_index: 0,
+                audio_index: 1,
+                has_audio: true,
+                still: false,
+                audio_only: false,
+                seconds: 1.0,
+            }),
+            proxy_dir: std::env::temp_dir(),
+            tier: proxy::Tier::Phone,
+        }
+    }
+
+    /// A phone copy is only ever queued because a phone has connected, and
+    /// whoever is holding it has left the desk. Stopping the work the moment
+    /// the window loses focus — right for every other speculative job — would
+    /// mean it only ever progressed while being watched.
+    #[test]
+    fn phone_copies_are_made_while_the_window_is_not_focused() {
+        let ctx = egui::Context::default();
+        // No tools, so every job fails at once — what matters is which
+        // ones are picked up at all.
+        let pool = WorkerPool::new(ctx, Tools::default());
+        pool.set_suspended(true);
+
+        let phone = ClipId::new();
+        let sheet = ClipId::new();
+        pool.submit(Job::Thumbs {
+            clip_id: sheet,
+            path: PathBuf::from("a.mp4"),
+            duration_frames: 30,
+            fps: Rational::new(30, 1),
+            tiles: 16,
+            still: false,
+            pixels: 1920 * 1080,
+            cache_dir: None,
+        });
+        pool.submit(phone_proxy_job(phone));
+
+        let mut seen = Vec::new();
+        while let Ok(r) = pool
+            .results
+            .recv_timeout(std::time::Duration::from_millis(500))
+        {
+            seen.push(r);
+        }
+        assert!(
+            seen.iter().any(|r| matches!(
+                r,
+                JobResult::ProxyDone { clip_id, tier: proxy::Tier::Phone, .. } if *clip_id == phone
+            )),
+            "the phone copy was not attempted while suspended: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|r| matches!(r, JobResult::Thumbs { .. })),
+            "a sheet ran while suspended, which §3 forbids: {seen:?}"
+        );
+        // The sheet is still waiting, not lost.
+        assert_eq!(pool.shared.queue.lock().unwrap().low.len(), 1);
+    }
+
+    /// The phone asks for clips in the order its owner taps them, and the
+    /// queue was filled in bin order.
+    #[test]
+    fn the_clip_on_the_phone_jumps_the_phone_queue() {
+        let ctx = egui::Context::default();
+        let pool = WorkerPool::new(ctx, Tools::default());
+        let ids: Vec<ClipId> = (0..4).map(|_| ClipId::new()).collect();
+        // Pushed under the lock, so no worker can take one before the order
+        // is checked — unlike a suspension, which phone work ignores.
+        {
+            let mut q = pool.shared.queue.lock().unwrap();
+            q.suspended = true;
+            for id in &ids {
+                q.phone.push_back(phone_proxy_job(*id));
+            }
+            q.shutdown = true; // and nothing is ever taken
+        }
+        let order = |pool: &WorkerPool| -> Vec<ClipId> {
+            pool.shared
+                .queue
+                .lock()
+                .unwrap()
+                .phone
+                .iter()
+                .map(|j| match j {
+                    Job::Proxy { clip_id, .. } => *clip_id,
+                    _ => unreachable!("only proxies go on the phone queue"),
+                })
+                .collect()
+        };
+        assert_eq!(order(&pool), ids);
+        assert!(pool.prioritise_phone_proxy(ids[2]));
+        assert_eq!(order(&pool), [ids[2], ids[0], ids[1], ids[3]]);
+        assert!(!pool.prioritise_phone_proxy(ClipId::new()));
     }
 
     /// Skimming a full bin is worthless if the sheet for the clip under the
