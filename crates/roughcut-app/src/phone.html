@@ -97,6 +97,9 @@
   .primary { background:var(--keep); border-color:var(--keep-lit); color:#06130c; }
   .primary:disabled { background:var(--raised); border-color:var(--line); color:var(--text); }
   .on { border-color:var(--out); color:var(--out); }
+  #speed { flex:0 0 auto; min-width:64px; font-family:var(--mono);
+           font-variant-numeric:tabular-nums; }
+  #speed.fast { border-color:var(--accent); color:var(--accent); }
 
   .keeps { margin-top:14px; }
   .keeps h2 { font-size:11px; font-weight:600; letter-spacing:.08em;
@@ -177,6 +180,7 @@
 
     <div class="row">
       <button id="keep" class="primary" disabled>Keep this stretch</button>
+      <button id="speed" aria-label="Playback speed">1&times;</button>
     </div>
     <div class="row">
       <button id="prev">‹ Prev</button>
@@ -472,6 +476,53 @@
   }
 
   $("clear").onclick = function () { sel = null; paintBar(); };
+
+  // --- speed ---------------------------------------------------------------
+
+  // Footage is reviewed here, not watched: at 2x a minute of talking is
+  // still intelligible, since the browser holds the pitch, and the pass
+  // takes half as long. One button cycles the rates. The choice is kept
+  // across clips and across opening the page again, because a pass is set
+  // up once and then run.
+  var RATES = [1, 1.5, 2], rate = 1;
+  try { rate = +localStorage.getItem("roughcut.rate") || 1; } catch (e) {}
+  if (RATES.indexOf(rate) < 0) rate = 1;
+  if ("preservesPitch" in v) v.preservesPitch = true;
+
+  function paintSpeed() {
+    $("speed").textContent = rate + "×";
+    $("speed").classList.toggle("fast", rate !== 1);
+  }
+  function applyRate() {
+    // Loading a file resets playbackRate to the default, so the default is
+    // set too: a new clip then starts at the chosen speed on its own.
+    v.defaultPlaybackRate = rate;
+    v.playbackRate = rate;
+    paintSpeed();
+  }
+  $("speed").onclick = function () {
+    rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length];
+    try { localStorage.setItem("roughcut.rate", rate); } catch (e) {}
+    applyRate();
+  };
+  // iOS has been known to drop the rate on load regardless of the default,
+  // so it is put back when the file is ready and when playback starts.
+  v.addEventListener("loadedmetadata", function () { v.playbackRate = rate; });
+  v.addEventListener("play", function () {
+    if (v.playbackRate !== rate) v.playbackRate = rate;
+  });
+  // The phone's own full-screen controls have a speed menu of their own.
+  // Whatever is chosen there is the speed now, and the button says so.
+  v.addEventListener("ratechange", function () {
+    var r = v.playbackRate;
+    if (r > 0 && r !== rate) {
+      rate = r;
+      v.defaultPlaybackRate = r;
+      try { localStorage.setItem("roughcut.rate", r); } catch (e) {}
+      paintSpeed();
+    }
+  });
+  applyRate();
 
   // One gesture on the bar does both jobs: a drag paints the stretch you are
   // choosing, a tap moves the playhead. They are told apart by distance, so
