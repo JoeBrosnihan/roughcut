@@ -54,14 +54,13 @@ The copyright holder can release the same code under any terms. If a
 commercial user ever needs a permissive copy, an MIT-licensed version can be
 offered alongside the GPL one — standard dual licensing.
 
-This works **only while the copyright is undivided**. Roughcut is not accepting
-code contributions; issues and feature requests are welcome, but patches are
-not merged. That keeps relicensing a decision rather than a negotiation.
-
-If that ever changes, contributions must come with an explicit grant — a CLA,
-or a stated policy that submissions may be relicensed by the maintainer —
-agreed *before* the first patch lands. Retrofitting one means tracking down
-every past contributor.
+This works **only while the copyright is undivided**, which is why
+contributions come with an explicit grant, agreed *before* the first patch
+lands: [CONTRIBUTING.md](../CONTRIBUTING.md) states that a submission is
+GPL-3.0-or-later and that the maintainer may also distribute it under other
+terms. That keeps relicensing a decision rather than a negotiation.
+Retrofitting such a grant would mean tracking down every past contributor,
+so the policy was in place before any patch was accepted.
 
 Note also that a release already published under the GPL stays GPL; it cannot
 be retracted. Future releases may carry different terms.

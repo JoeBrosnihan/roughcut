@@ -48,5 +48,6 @@ from a script or an AI agent, with no window at all.
 ## Licence
 
 **GPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICES.md](NOTICES.md) and
-[docs/licensing.md](docs/licensing.md). Issues welcome; code contributions are
-not currently accepted.
+[docs/licensing.md](docs/licensing.md). Issues and pull requests welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md), which also names the change wanted most:
+macOS on Apple Silicon, where it has never yet been run.
