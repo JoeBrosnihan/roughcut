@@ -1,11 +1,11 @@
 # Contributing
 
-Pull requests are welcome. The one most wanted right now is **macOS on
-Apple Silicon**: the code compiles for it but has never been linked or run
-there. [docs/building.md](docs/building.md) has the build steps and, under
-"What macOS still needs", the list of things nobody has tried yet. A PR that
-gets the window open, plays a clip, and exports an `.mlt` is the goal; the
-things to test are in [docs/verification.md](docs/verification.md).
+Pull requests are welcome. Apple Silicon macOS now has a verified local
+build with playback and export. The remaining work includes self-contained
+packaging, screenshot paste, and child-process memory accounting.
+[docs/macos.md](docs/macos.md) records what has been tested and what remains;
+[docs/verification.md](docs/verification.md) describes the checks for changes
+that affect playback, timing, or export.
 
 ## Terms
 

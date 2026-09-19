@@ -20,7 +20,7 @@ are for people building or changing it.
 | --- | --- |
 | `x86_64-pc-windows-msvc` | Built, run, measured |
 | `x86_64-apple-darwin` | Type-checks clean; never linked or run |
-| `aarch64-apple-darwin` | Type-checks clean; never linked or run |
+| `aarch64-apple-darwin` | Built and run on macOS 26.6; playback and export verified |
 
 ## Toolchain
 
@@ -30,7 +30,7 @@ is 1.88.
 ```
 cargo build --release
 cargo test --workspace
-cargo run --release -- path\to\clip.mp4
+cargo run --release --bin roughcut -- path/to/clip.mp4
 ```
 
 Files named on the command line are opened at startup: a `.roughcut` file as a
@@ -38,15 +38,15 @@ project, anything else as media to import.
 
 ## External dependencies
 
-Nothing is vendored into the build. Three external pieces are looked up at
+Nothing is vendored into the build. External tools are looked up at
 runtime, on `PATH` first and then in well-known locations — including a Shotcut
-installation, which bundles all three.
+installation.
 
 | Tool | Needed for | If missing |
 | --- | --- | --- |
 | `ffprobe` | Import — frame rates, durations, stream indices | Blocking dialog on first import, offering to locate it |
 | `ffmpeg` | Bin thumbnails and proxy generation | Thumbnails and proxies are skipped |
-| `melt` | The frame-accuracy test only | That test degrades to XML assertions and says so |
+| `melt` | Direct MP4 export and render tests | MP4 export unavailable; MLT project export still works |
 
 Paths can be overridden in `settings.json` (see *State locations* below).
 
@@ -70,37 +70,44 @@ extract `libmpv-2.dll` to one of the above. On macOS, `brew install mpv`.
 
 ## macOS
 
+Install a current stable Rust toolchain and the Xcode Command Line Tools, then:
+
+```sh
+brew install mpv ffmpeg mlt
+cargo run --release --bin roughcut
 ```
-brew install mpv ffmpeg
-cargo run --release
+
+For a Finder-launchable local development bundle:
+
+```sh
+./tools/build-macos.sh
+open target/macos/Roughcut.app
 ```
+
+The bundle uses `target/dev-config/` for settings and writes its log to
+`target/macos/roughcut.log`. It still depends on the tools installed on this
+Mac; it is not a self-contained distribution. Quit and reopen it after a rebuild.
 
 Build for the architecture of the machine you are on — `aarch64-apple-darwin`
 on Apple Silicon, `x86_64-apple-darwin` on Intel. The application and libmpv
 must be the same architecture; an x86_64 build under Rosetta cannot load
 Homebrew's arm64 `libmpv.2.dylib`.
 
-### What macOS still needs
+The first Apple Silicon run verified the OpenGL monitor, VideoToolbox H.264
+playback, native import/save dialogs, editing, and MLT/MP4 export. Intel Macs
+remain untested. See [macos.md](macos.md) for the measured checks, test setup,
+and remaining gaps (including screenshot paste and memory accounting).
 
-Both Darwin targets pass `cargo check --workspace --all-targets`, which
-compiles every macOS `cfg` branch — library discovery, the OpenGL framework
-loader, thread QoS, config paths — and type-checks the whole app against
-macOS's winit and eframe. That guarantees nothing is *missing*. It does not
-link, and none of the following has been exercised even once:
+Homebrew's standard FFmpeg 9 lacks `drawtext`, which the frame-accuracy tests
+use to label their source frames. For the complete media test suite:
 
-- That it links at all — that needs the Apple SDK.
-- **mpv's OpenGL render API on Apple's GL.** Apple deprecated OpenGL and caps
-  it at 4.1. Everything Roughcut uses is well inside that (`glBlitFramebuffer`
-  is GL 3.0), but "should be fine" is not "was tried".
-- **`videotoolbox` hardware decode.** `hwdec=auto-safe` should select it; the
-  alert bar will say so if it does not.
-- **Retina scaling.** The render target is sized from `viewport_in_pixels()`,
-  which is physical pixels, so a 2× display ought to be correct by
-  construction — again, untested.
-- Native file dialogs, and the app-bundle layout.
+```sh
+brew install ffmpeg-full
+PATH="$(brew --prefix ffmpeg-full)/bin:$PATH" cargo test --locked --workspace
+```
 
-Expect the first run on a Mac to need fixing. Nothing on that list is
-structural.
+This changes tool discovery only for that command; normal editing works with
+standard FFmpeg.
 
 ## stable and dev
 

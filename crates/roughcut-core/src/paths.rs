@@ -132,6 +132,35 @@ mod tests {
         assert_eq!(dev_config_for(Path::new("/w/target/debug/deps/t-1a2b")), None);
     }
 
+    /// Exercise the actual config-path resolver with native paths. A Windows
+    /// backslash is a filename character on Unix, not a directory separator.
+    #[test]
+    fn only_cargo_build_directories_count_as_dev() {
+        let root = if cfg!(windows) {
+            Path::new(r"C:\src")
+        } else {
+            Path::new("/src")
+        };
+        for relative in [
+            "roughcut/target/release/roughcut",
+            "roughcut/target/debug/roughcut-cli",
+        ] {
+            assert_eq!(
+                dev_config_for(&root.join(relative)),
+                Some(root.join("roughcut/target/dev-config")),
+            );
+        }
+        for relative in [
+            "Programs/Roughcut/roughcut",
+            "bin/roughcut",
+            "target/roughcut",
+            "apps/release/roughcut",
+            "target/staging/roughcut",
+        ] {
+            assert_eq!(dev_config_for(&root.join(relative)), None, "{relative}");
+        }
+    }
+
     #[test]
     fn an_override_wins() {
         // Not tested through `config_dir` itself: the environment is process
