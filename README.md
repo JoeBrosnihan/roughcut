@@ -2,6 +2,8 @@
 
 Assemble a rough cut fast, then finish it in Shotcut.
 
+![Roughcut: the bin on the left, the monitor, and the timeline along the bottom](assets/screenshot.jpg)
+
 Point Roughcut at a folder of video and photos, skim it, mark the good bits,
 and build an ordered sequence. Export a `.mlt` project that Shotcut opens with
 every cut exactly where you put it.
