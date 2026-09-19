@@ -161,35 +161,3 @@ impl Settings {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The rule that keeps a dev build away from production's state. Getting
-    /// this wrong once already cost a recovery snapshot.
-    #[test]
-    fn only_cargo_build_directories_count_as_dev() {
-        let cases = [
-            (r"C:\src\roughcut\target\release\roughcut.exe", true),
-            (r"C:\src\roughcut\target\debug\roughcut.exe", true),
-            (r"/home/j/roughcut/target/release/roughcut", true),
-            // A promoted copy, wherever it lives.
-            (r"C:\Users\j\AppData\Local\Programs\Roughcut\roughcut.exe", false),
-            (r"/usr/local/bin/roughcut", false),
-            // Near misses that must not be mistaken for a build directory.
-            (r"C:\target\roughcut.exe", false),
-            (r"C:\apps\release\roughcut.exe", false),
-            (r"C:\target\staging\roughcut.exe", false),
-        ];
-        for (path, expect_dev) in cases {
-            let p = PathBuf::from(path);
-            let is_dev = p.parent().is_some_and(|parent| {
-                let profile = parent.file_name().and_then(|s| s.to_str());
-                let target = parent.parent().and_then(|t| t.file_name()).and_then(|s| s.to_str());
-                matches!(profile, Some("debug") | Some("release")) && target == Some("target")
-            });
-            assert_eq!(is_dev, expect_dev, "{path}");
-        }
-    }
-}

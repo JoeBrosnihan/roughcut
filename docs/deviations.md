@@ -32,10 +32,10 @@ without leaving a corrupt file behind.
 is given verbatim in the brief and is used verbatim; worth knowing if you feed
 it SD material.
 
-**7. macOS type-checks but has never been linked or run.** Both
-`x86_64-apple-darwin` and `aarch64-apple-darwin` pass
-`cargo check --workspace --all-targets`. aarch64 was added beyond the brief's
-Intel-only requirement because most Macs are no longer Intel.
+**7. Apple Silicon macOS now has a verified local build.** Both Darwin
+architectures were initially type-checked; Apple Silicon has since been linked
+and run with video playback and export. Intel remains untested at runtime.
+See [macos.md](macos.md) for the test environment and remaining platform gaps.
 
 **8. Autosave is not in the brief at all.** It was added because §11's
 save-on-demand model loses everything between saves. It is event-driven

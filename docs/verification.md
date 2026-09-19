@@ -1,7 +1,9 @@
 # Verification
 
-`cargo test --workspace` — 299 tests, no warnings, clippy clean on Windows and
-type-checking clean on both macOS targets.
+The original Windows verification recorded 299 tests and a clean clippy run.
+The Apple Silicon verification runs 333 tests successfully with FFmpeg and MLT
+installed, including the real media tests. Clippy completes with existing
+warnings on Rust 1.98.1; see [macos.md](macos.md) for the environment and limits.
 
 ## Frame accuracy
 
@@ -116,4 +118,4 @@ Two need explanation:
   timer-driven backward seeks; at 180 ms each on 4K, even 1× cannot keep up, so
   the `8x` indicator does not mean what it says. It is honest on 1080p and on
   proxies.
-- **macOS has never been run.** See [building.md](building.md).
+- **Intel macOS remains untested at runtime.** Apple Silicon results and remaining gaps are in [macos.md](macos.md).

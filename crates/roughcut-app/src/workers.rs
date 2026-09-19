@@ -1323,14 +1323,18 @@ mod tests {
         let pool = WorkerPool::new(ctx, Tools::default());
         let ids: Vec<ClipId> = (0..5).map(|_| ClipId::new()).collect();
 
-        // Suspend first, so nothing is picked up while the order is checked.
-        pool.set_suspended(true);
-        for id in &ids {
-            pool.submit(Job::Transcribe {
-                clip_id: *id,
-                path: PathBuf::from("a.mp4"),
-                cache_dir: None,
-            });
+        // Transcription intentionally ignores suspension. Keep workers out
+        // while checking queue order, just as the phone-queue test does.
+        {
+            let mut q = pool.shared.queue.lock().unwrap();
+            for id in &ids {
+                q.slow.push_back(Job::Transcribe {
+                    clip_id: *id,
+                    path: PathBuf::from("a.mp4"),
+                    cache_dir: None,
+                });
+            }
+            q.shutdown = true;
         }
 
         let order = |pool: &WorkerPool| -> Vec<ClipId> {
@@ -1466,7 +1470,13 @@ mod tests {
         });
         pool.submit(phone_proxy_job(phone));
 
-        let mut seen = Vec::new();
+        // A background-QoS worker may take longer to be scheduled on a busy
+        // Mac. Wait for its result, not for an arbitrary 500 ms quiet period.
+        let first = pool
+            .results
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the phone copy was not attempted while suspended");
+        let mut seen = vec![first];
         while let Ok(r) = pool
             .results
             .recv_timeout(std::time::Duration::from_millis(500))

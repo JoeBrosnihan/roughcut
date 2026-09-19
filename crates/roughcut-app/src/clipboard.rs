@@ -115,6 +115,7 @@ pub fn paste_chord_pressed() -> bool {
 /// Two things routinely catch people out and both are handled here: a
 /// negative height means the rows are stored top-down rather than the usual
 /// bottom-up, and each row is padded to a multiple of four bytes.
+#[cfg(any(windows, test))]
 pub fn dib_to_rgba(bytes: &[u8]) -> Option<RgbaImage> {
     const MAX_SIDE: u32 = 16_384;
 

@@ -18,6 +18,9 @@ and `ffmpeg`, which Roughcut finds on its own — and you want it anyway to fini
 the edit) and **[mpv](https://mpv.io)** for playback. Without mpv everything
 still works except the picture.
 
+An Apple Silicon macOS development build is also verified locally; see
+[Mac setup and limitations](docs/macos.md).
+
 ## Using it
 
 Drop files on the window, or press `Ctrl+I`. The whole loop is three keys:
@@ -49,5 +52,4 @@ from a script or an AI agent, with no window at all.
 
 **GPL-3.0-or-later** — see [LICENSE](LICENSE), [NOTICES.md](NOTICES.md) and
 [docs/licensing.md](docs/licensing.md). Issues and pull requests welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md), which also names the change wanted most:
-macOS on Apple Silicon, where it has never yet been run.
+[CONTRIBUTING.md](CONTRIBUTING.md), which also describes the remaining macOS work.
